@@ -391,3 +391,91 @@ class DatabaseQueries:
         except Exception as e:
             logger.error(f"Ошибка очистки будущих свечей для {symbol}: {e}")
             return 0
+
+    async def get_data_time_range(self, symbol: str) -> Dict:
+        """Получение временного диапазона данных для символа"""
+        try:
+            query = """
+            SELECT 
+                MIN(start_time) as earliest_time,
+                MAX(start_time) as latest_time,
+                COUNT(*) as total_count
+            FROM kline_data 
+            WHERE symbol = %s AND is_closed = true
+            """
+            result = await self.db_connection.execute_query(query, (symbol,))
+            
+            if result and result[0]['total_count'] > 0:
+                return {
+                    'earliest_time': result[0]['earliest_time'],
+                    'latest_time': result[0]['latest_time'],
+                    'total_count': result[0]['total_count']
+                }
+            else:
+                return {
+                    'earliest_time': None,
+                    'latest_time': None,
+                    'total_count': 0
+                }
+        except Exception as e:
+            logger.error(f"Ошибка получения временного диапазона для {symbol}: {e}")
+            return {'earliest_time': None, 'latest_time': None, 'total_count': 0}
+
+    async def adjust_data_for_new_settings(self, symbol: str, analysis_hours: int, offset_minutes: int) -> Dict:
+        """Корректировка данных под новые настройки анализа"""
+        try:
+            # Рассчитываем требуемый диапазон времени
+            current_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            offset_ms = offset_minutes * 60 * 1000
+            end_time_ms = current_time_ms - offset_ms
+            start_time_ms = end_time_ms - (analysis_hours * 60 * 60 * 1000)
+            
+            # Получаем текущий диапазон данных
+            current_range = await self.get_data_time_range(symbol)
+            
+            result = {
+                'symbol': symbol,
+                'required_start': start_time_ms,
+                'required_end': end_time_ms,
+                'current_earliest': current_range['earliest_time'],
+                'current_latest': current_range['latest_time'],
+                'current_count': current_range['total_count'],
+                'actions_taken': []
+            }
+            
+            # Если нет данных, возвращаем информацию для загрузки
+            if current_range['total_count'] == 0:
+                result['actions_taken'].append('no_data_found')
+                return result
+            
+            # Удаляем данные старше требуемого начала
+            if current_range['earliest_time'] and current_range['earliest_time'] < start_time_ms:
+                deleted_old = await self.cleanup_old_candles_before_time(symbol, start_time_ms)
+                if deleted_old > 0:
+                    result['actions_taken'].append(f'deleted_old_data: {deleted_old} candles')
+                    logger.info(f"🧹 Удалено {deleted_old} старых свечей для {symbol}")
+            
+            # Удаляем данные новее требуемого конца
+            if current_range['latest_time'] and current_range['latest_time'] > end_time_ms:
+                deleted_future = await self.cleanup_future_candles_after_time(symbol, end_time_ms)
+                if deleted_future > 0:
+                    result['actions_taken'].append(f'deleted_future_data: {deleted_future} candles')
+                    logger.info(f"🧹 Удалено {deleted_future} будущих свечей для {symbol}")
+            
+            # Проверяем целостность данных после очистки
+            integrity = await self.check_data_integrity_range(symbol, start_time_ms, end_time_ms)
+            result['final_integrity'] = integrity
+            
+            if integrity['integrity_percentage'] < 95:
+                result['actions_taken'].append(f'needs_loading: {integrity["missing_count"]} candles')
+                logger.info(f"📊 Требуется загрузка {integrity['missing_count']} свечей для {symbol}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Ошибка корректировки данных для {symbol}: {e}")
+            return {
+                'symbol': symbol,
+                'error': str(e),
+                'actions_taken': ['error']
+            }
