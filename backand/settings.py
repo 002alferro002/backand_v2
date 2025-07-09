@@ -429,32 +429,40 @@ class SettingsFileHandler(FileSystemEventHandler):
 
 def create_env_file():
     """Создание .env файла с настройками по умолчанию"""
-    if ENV_FILE_PATH.exists():
-        return
+    # Всегда создаем файл если его нет, независимо от других ошибок
+    try:
+        if ENV_FILE_PATH.exists():
+            return
 
-    with open(ENV_FILE_PATH, 'w', encoding='utf-8') as f:
-        f.write("# Настройки CryptoScan\n")
-        f.write("# Этот файл создан автоматически. Измените значения по необходимости.\n")
-        f.write(f"# Создан: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        # Создаем директорию если её нет
+        ENV_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-        # Группируем настройки по категориям
-        categories = {}
-        for key, config in DEFAULT_SETTINGS.items():
-            category = config['category']
-            if category not in categories:
-                categories[category] = []
-            categories[category].append(key)
+        with open(ENV_FILE_PATH, 'w', encoding='utf-8') as f:
+            f.write("# Настройки CryptoScan\n")
+            f.write("# Этот файл создан автоматически. Измените значения по необходимости.\n")
+            f.write(f"# Создан: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
-        for category, keys in categories.items():
-            f.write(f"# {category}\n")
-            for key in keys:
-                config = DEFAULT_SETTINGS[key]
-                f.write(f"# {config['description']}\n")
-                f.write(f"{key}={config['value']}\n")
-            f.write("\n")
+            # Группируем настройки по категориям
+            categories = {}
+            for key, config in DEFAULT_SETTINGS.items():
+                category = config['category']
+                if category not in categories:
+                    categories[category] = []
+                categories[category].append(key)
 
-    print(f"✅ Создан файл настроек: {ENV_FILE_PATH}")
+            for category, keys in categories.items():
+                f.write(f"# {category}\n")
+                for key in keys:
+                    config = DEFAULT_SETTINGS[key]
+                    f.write(f"# {config['description']}\n")
+                    f.write(f"{key}={config['value']}\n")
+                f.write("\n")
 
+        print(f"✅ Создан файл настроек: {ENV_FILE_PATH}")
+        
+    except Exception as e:
+        print(f"❌ Ошибка создания файла настроек: {e}")
+        # Не прерываем выполнение - система должна работать
 
 def load_settings() -> Dict[str, Any]:
     """Загрузка настроек из .env файла или создание файла с настройками по умолчанию"""

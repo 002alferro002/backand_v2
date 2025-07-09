@@ -209,6 +209,12 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("🚀 Запуск системы анализа объемов...")
 
+        # КРИТИЧЕСКИ ВАЖНО: Создаем .env файл в первую очередь
+        from settings import create_env_file, load_settings
+        create_env_file()  # Создаем файл настроек если его нет
+        initial_settings = load_settings()  # Загружаем настройки
+        logger.info("✅ Файл настроек создан/загружен")
+
         # Инициализация менеджера WebSocket соединений
         connection_manager = ConnectionManager()
 
@@ -217,28 +223,51 @@ async def lifespan(app: FastAPI):
         await time_manager.start()
         logger.info("⏰ Синхронизация времени запущена")
 
-        # Инициализация базы данных
-        db_connection = DatabaseConnection()
-        await db_connection.initialize()
+        # Инициализация базы данных с обработкой ошибок
+        db_connection = None
+        db_queries = None
+        db_initialized = False
+        
+        try:
+            db_connection = DatabaseConnection()
+            await db_connection.initialize()
 
-        # Создание таблиц
-        db_tables = DatabaseTables(db_connection)
-        await db_tables.create_all_tables()
+            # Создание таблиц
+            db_tables = DatabaseTables(db_connection)
+            await db_tables.create_all_tables()
 
-        # Инициализация запросов к БД
-        db_queries = DatabaseQueries(db_connection)
+            # Инициализация запросов к БД
+            db_queries = DatabaseQueries(db_connection)
+            db_initialized = True
+            logger.info("✅ База данных инициализирована")
+            
+        except Exception as db_error:
+            logger.error(f"❌ Ошибка инициализации базы данных: {db_error}")
+            logger.warning("⚠️ Система продолжит работу без базы данных")
+            logger.warning("⚠️ Некоторые функции будут недоступны")
+            
+            # Уведомляем через WebSocket о проблеме с БД
+            if connection_manager:
+                await connection_manager.send_system_notification(
+                    "database_error",
+                    {
+                        "message": "Ошибка подключения к базе данных",
+                        "error": str(db_error),
+                        "impact": "Система работает в ограниченном режиме"
+                    }
+                )
 
         # Инициализация Telegram бота
         telegram_bot = TelegramBot()
 
-        # Инициализация менеджера алертов
+        # Инициализация менеджера алертов (работает и без БД)
         alert_manager = AlertManager(db_queries, telegram_bot, connection_manager, time_manager)
 
         # Инициализация Bybit API
         bybit_api = BybitRestAPI()
         await bybit_api.start()
 
-        # Инициализация фильтра цен
+        # Инициализация фильтра цен (работает и без БД)
         price_filter = PriceFilter(db_queries)
 
         # Инициализация WebSocket менеджера Bybit
@@ -259,16 +288,27 @@ async def lifespan(app: FastAPI):
         # Запуск всех сервисов
         logger.info("🔄 Запуск сервисов...")
 
-        # Получаем начальный watchlist
-        initial_watchlist = await db_queries.get_watchlist()
-        if initial_watchlist:
-            # Устанавливаем торговые пары в WebSocket менеджер
-            bybit_websocket.trading_pairs = set(initial_watchlist)
-            logger.info(f"📋 Установлен начальный watchlist: {len(initial_watchlist)} пар")
+        # Получаем начальный watchlist (только если БД доступна)
+        if db_initialized and db_queries:
+            try:
+                initial_watchlist = await db_queries.get_watchlist()
+                if initial_watchlist:
+                    # Устанавливаем торговые пары в WebSocket менеджер
+                    bybit_websocket.trading_pairs = set(initial_watchlist)
+                    logger.info(f"📋 Установлен начальный watchlist: {len(initial_watchlist)} пар")
+                else:
+                    logger.info("📋 Watchlist пуст")
+            except Exception as e:
+                logger.error(f"❌ Ошибка загрузки watchlist: {e}")
+        else:
+            logger.warning("⚠️ Watchlist недоступен - база данных не инициализирована")
 
         # Запускаем фильтр цен
         if get_setting('WATCHLIST_AUTO_UPDATE', True):
-            asyncio.create_task(price_filter.start())
+            if db_initialized:
+                asyncio.create_task(price_filter.start())
+            else:
+                logger.warning("⚠️ Автообновление watchlist отключено - база данных недоступна")
         else:
             logger.info("🔍 Автоматическое обновление watchlist отключено")
 
@@ -276,7 +316,11 @@ async def lifespan(app: FastAPI):
         bybit_websocket.is_running = True
         asyncio.create_task(bybit_websocket_loop())
 
-        asyncio.create_task(historical_data_loader())
+        # Запускаем загрузчик исторических данных только если БД доступна
+        if db_initialized:
+            asyncio.create_task(historical_data_loader())
+        else:
+            logger.warning("⚠️ Загрузчик исторических данных отключен - база данных недоступна")
 
         # Запуск периодической очистки данных
         asyncio.create_task(periodic_cleanup())
@@ -290,11 +334,17 @@ async def lifespan(app: FastAPI):
         # Запускаем мониторинг изменений .env файла
         start_settings_monitor()
 
-        logger.info("✅ Система успешно запущена!")
+        if db_initialized:
+            logger.info("✅ Система успешно запущена в полном режиме!")
+        else:
+            logger.warning("⚠️ Система запущена в ограниченном режиме (без базы данных)")
+            logger.info("💡 Настройте подключение к базе данных в .env файле и перезапустите")
 
     except Exception as e:
         logger.error(f"❌ Ошибка запуска системы: {e}")
-        raise
+        logger.error("❌ Система не может быть запущена")
+        # Не прерываем запуск - позволяем системе работать для настройки
+        pass
 
     yield
 
@@ -346,9 +396,25 @@ async def historical_data_loader():
     """Периодическая загрузка исторических данных"""
     while True:
         try:
+            # Проверяем доступность компонентов
+            if not db_queries:
+                logger.warning("⚠️ Загрузчик исторических данных: база данных недоступна")
+                await asyncio.sleep(300)  # Ждем 5 минут и проверяем снова
+                continue
+                
+            if not bybit_api:
+                logger.warning("⚠️ Загрузчик исторических данных: Bybit API недоступен")
+                await asyncio.sleep(300)
+                continue
+                
             if db_queries and bybit_api:
                 # Получаем текущий watchlist
-                watchlist = await db_queries.get_watchlist()
+                try:
+                    watchlist = await db_queries.get_watchlist()
+                except Exception as e:
+                    logger.error(f"❌ Ошибка получения watchlist: {e}")
+                    await asyncio.sleep(300)
+                    continue
 
                 for symbol in watchlist:
                     try:
@@ -423,11 +489,16 @@ async def periodic_cleanup():
     while True:
         try:
             await asyncio.sleep(3600)  # Каждый час
+            
             if alert_manager:
                 await alert_manager.cleanup_old_data()
+                
             if db_queries:
                 retention_hours = get_setting('DATA_RETENTION_HOURS', 2)
                 # Здесь можно добавить очистку старых данных через db_queries
+            else:
+                logger.debug("🧹 Очистка БД пропущена - база данных недоступна")
+                
             logger.info("🧹 Периодическая очистка данных выполнена")
         except Exception as e:
             logger.error(f"❌ Ошибка периодической очистки: {e}")
@@ -538,17 +609,34 @@ async def get_time_info():
 async def get_watchlist():
     """Получить список торговых пар"""
     try:
+        if not db_queries:
+            return {
+                "error": "База данных недоступна",
+                "pairs": [],
+                "message": "Настройте подключение к базе данных в настройках"
+            }
+            
         pairs = await db_queries.get_watchlist_details()
         return {"pairs": pairs}
     except Exception as e:
         logger.error(f"Ошибка получения watchlist: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "error": str(e),
+            "pairs": [],
+            "message": "Ошибка получения данных из базы"
+        }
 
 
 @app.post("/api/watchlist")
 async def add_to_watchlist(item: WatchlistAdd):
     """Добавить торговую пару в watchlist"""
     try:
+        if not db_queries:
+            return {
+                "status": "error",
+                "message": "База данных недоступна. Настройте подключение в настройках."
+            }
+            
         await db_queries.add_to_watchlist(item.symbol)
 
         # Добавляем пару в WebSocket менеджер
@@ -566,7 +654,10 @@ async def add_to_watchlist(item: WatchlistAdd):
         return {"status": "success", "symbol": item.symbol}
     except Exception as e:
         logger.error(f"Ошибка добавления в watchlist: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "status": "error",
+            "message": f"Ошибка добавления в watchlist: {str(e)}"
+        }
 
 
 @app.get("/api/chart-data/{symbol}")
@@ -651,11 +742,23 @@ async def get_settings():
         if time_manager:
             time_sync_info = time_manager.get_sync_status()
 
+        # Информация о состоянии системы
+        system_status = {
+            "database_available": db_queries is not None,
+            "database_connection": db_connection is not None,
+            "alert_manager_active": alert_manager is not None,
+            "websocket_active": bybit_websocket is not None and bybit_websocket.is_running,
+            "price_filter_active": price_filter is not None,
+            "telegram_bot_enabled": telegram_bot is not None and telegram_bot.enabled
+        }
+
         return {
             "categories": settings_by_category,
             "time_sync": time_sync_info,
+            "system_status": system_status,
             "system_info": {
-                "config_file": str(ENV_FILE_PATH),
+                "config_file": str(ENV_FILE_PATH) if ENV_FILE_PATH.exists() else "Файл не создан",
+                "config_exists": ENV_FILE_PATH.exists(),
                 "last_modified": datetime.fromtimestamp(ENV_FILE_PATH.stat().st_mtime).isoformat() if ENV_FILE_PATH.exists() else None
             }
         }
@@ -670,7 +773,10 @@ async def create_paper_trade(trade: PaperTradeCreate):
     """Создание бумажной сделки"""
     try:
         if not db_queries:
-            return {"status": "error", "message": "Database not initialized"}
+            return {
+                "status": "error", 
+                "message": "База данных недоступна. Настройте подключение в настройках."
+            }
 
         # Сохраняем бумажную сделку в базу данных
         trade_id = await db_queries.save_paper_trade(trade.dict())
@@ -772,25 +878,28 @@ async def update_settings(settings_update: SettingsUpdate):
             "status": "success",
             "data": settings,
             "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
-            "message": "Настройки успешно обновлены и сохранены"
+            "message": "Настройки успешно обновлены и сохранены",
+            "system_restart_required": False  # Настройки применяются автоматически
         })
         
         logger.info("✅ Настройки успешно обновлены через API")
         return {
             "status": "success", 
             "updated_count": len(flat_settings),
-            "message": "Настройки успешно обновлены и сохранены"
+            "message": "Настройки успешно обновлены и сохранены",
+            "applied_immediately": True
         }
         
     except Exception as e:
         logger.error(f"Ошибка обновления настроек: {e}")
         
         # Уведомляем клиентов об ошибке
-        await connection_manager.broadcast_json({
-            "type": "settings_update_error",
-            "error": str(e),
-            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
-        })
+        if connection_manager:
+            await connection_manager.broadcast_json({
+                "type": "settings_update_error",
+                "error": str(e),
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
         
         return {
             "status": "error", 
@@ -817,12 +926,13 @@ async def reset_settings(reset_data: SettingsReset):
             new_settings = load_settings()
             await update_all_components_settings(new_settings)
             
-            await connection_manager.broadcast_json({
-                "type": "settings_reset",
-                "status": "success",
-                "message": "Настройки сброшены к значениям по умолчанию",
-                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
-            })
+            if connection_manager:
+                await connection_manager.broadcast_json({
+                    "type": "settings_reset",
+                    "status": "success",
+                    "message": "Настройки сброшены к значениям по умолчанию",
+                    "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+                })
             
             return {
                 "status": "success",
@@ -868,12 +978,13 @@ async def import_settings_endpoint(import_data: SettingsImport):
             # Обновляем настройки во всех компонентах
             await update_all_components_settings(import_data.settings)
             
-            await connection_manager.broadcast_json({
-                "type": "settings_imported",
-                "status": "success",
-                "count": len(import_data.settings),
-                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
-            })
+            if connection_manager:
+                await connection_manager.broadcast_json({
+                    "type": "settings_imported",
+                    "status": "success",
+                    "count": len(import_data.settings),
+                    "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+                })
             
             return {
                 "status": "success",
@@ -916,6 +1027,12 @@ async def reload_settings_endpoint():
 async def remove_from_watchlist(symbol: str):
     """Удалить торговую пару из watchlist"""
     try:
+        if not db_queries:
+            return {
+                "status": "error",
+                "message": "База данных недоступна. Настройте подключение в настройках."
+            }
+            
         await db_queries.remove_from_watchlist(symbol)
 
         # Удаляем пару из WebSocket менеджера
@@ -933,7 +1050,10 @@ async def remove_from_watchlist(symbol: str):
         return {"status": "success", "symbol": symbol}
     except Exception as e:
         logger.error(f"Ошибка удаления из watchlist: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "status": "error",
+            "message": f"Ошибка удаления из watchlist: {str(e)}"
+        }
 
 
 # Проверяем существование директории dist перед монтированием
