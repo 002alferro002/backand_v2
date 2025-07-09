@@ -215,15 +215,15 @@ class DatabaseQueries:
                                           offset_minutes: int = 0, volume_type: str = 'long') -> List[float]:
         """Получение исторических объемов LONG свечей"""
         try:
-            # Безопасное преобразование параметров в числа
+            # Безопасное преобразование параметров в числа с обработкой дробных значений
             try:
-                hours_int = int(float(hours)) if hours is not None else 1
+                hours_int = max(1, int(round(float(hours)))) if hours is not None else 1
             except (ValueError, TypeError):
                 hours_int = 1
                 logger.warning(f"Некорректное значение hours: {hours}, используется значение по умолчанию: 1")
             
             try:
-                offset_minutes_int = int(float(offset_minutes)) if offset_minutes is not None else 0
+                offset_minutes_int = max(0, int(round(float(offset_minutes)))) if offset_minutes is not None else 0
             except (ValueError, TypeError):
                 offset_minutes_int = 0
                 logger.warning(f"Некорректное значение offset_minutes: {offset_minutes}, используется значение по умолчанию: 0")
@@ -598,9 +598,18 @@ class DatabaseQueries:
     async def adjust_data_for_new_settings(self, symbol: str, analysis_hours: int, offset_minutes: int) -> Dict:
         """Корректировка данных под новые настройки анализа"""
         try:
-            # Безопасное преобразование параметров
-            analysis_hours = max(1, int(analysis_hours)) if analysis_hours is not None else 1
-            offset_minutes = max(0, int(offset_minutes)) if offset_minutes is not None else 0
+            # Безопасное преобразование параметров с обработкой дробных значений
+            try:
+                analysis_hours = max(1, int(round(float(analysis_hours)))) if analysis_hours is not None else 1
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение analysis_hours: {analysis_hours}, используется 1")
+                analysis_hours = 1
+            
+            try:
+                offset_minutes = max(0, int(round(float(offset_minutes)))) if offset_minutes is not None else 0
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение offset_minutes: {offset_minutes}, используется 0")
+                offset_minutes = 0
             
             # Рассчитываем требуемый диапазон времени
             current_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)

@@ -632,16 +632,18 @@ class AlertManager:
         
         if 'ANALYSIS_HOURS' in new_settings:
             try:
-                # Безопасное преобразование через float для обработки дробных значений
-                self.settings['analysis_hours'] = max(1, int(float(new_settings['ANALYSIS_HOURS'])))
+                # Безопасное преобразование через float для обработки дробных значений, затем округление
+                hours_value = float(new_settings['ANALYSIS_HOURS'])
+                self.settings['analysis_hours'] = max(1, int(round(hours_value)))
             except (ValueError, TypeError):
                 logger.warning(f"Некорректное значение ANALYSIS_HOURS: {new_settings['ANALYSIS_HOURS']}, используется значение по умолчанию: 1")
                 self.settings['analysis_hours'] = 1
         
         if 'OFFSET_MINUTES' in new_settings:
             try:
-                # Безопасное преобразование через float для обработки дробных значений
-                self.settings['offset_minutes'] = max(0, int(float(new_settings['OFFSET_MINUTES'])))
+                # Безопасное преобразование через float для обработки дробных значений, затем округление
+                offset_value = float(new_settings['OFFSET_MINUTES'])
+                self.settings['offset_minutes'] = max(0, int(round(offset_value)))
             except (ValueError, TypeError):
                 logger.warning(f"Некорректное значение OFFSET_MINUTES: {new_settings['OFFSET_MINUTES']}, используется значение по умолчанию: 0")
                 self.settings['offset_minutes'] = 0

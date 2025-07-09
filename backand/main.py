@@ -94,10 +94,15 @@ async def correct_data_for_settings_change(new_settings: Dict):
     """Корректировка данных при изменении настроек анализа"""
     try:
         # Безопасное преобразование настроек
-        analysis_hours = safe_convert_to_int(new_settings.get('ANALYSIS_HOURS', get_setting('ANALYSIS_HOURS', 1)))
-        offset_minutes = safe_convert_to_int(new_settings.get('OFFSET_MINUTES', get_setting('OFFSET_MINUTES', 0)))
+        analysis_hours_raw = new_settings.get('ANALYSIS_HOURS', get_setting('ANALYSIS_HOURS', 1))
+        offset_minutes_raw = new_settings.get('OFFSET_MINUTES', get_setting('OFFSET_MINUTES', 0))
+        
+        # Безопасное преобразование с учетом дробных значений
+        analysis_hours = max(1, safe_convert_to_int(analysis_hours_raw, 1))
+        offset_minutes = max(0, safe_convert_to_int(offset_minutes_raw, 0))
         
         logger.info(f"🔧 Корректировка данных для новых настроек: ANALYSIS_HOURS={analysis_hours}, OFFSET_MINUTES={offset_minutes}")
+        logger.debug(f"Исходные значения: ANALYSIS_HOURS={analysis_hours_raw} (type: {type(analysis_hours_raw)}), OFFSET_MINUTES={offset_minutes_raw} (type: {type(offset_minutes_raw)})")
         
         # Получаем watchlist
         watchlist = await db_queries.get_watchlist()
@@ -167,7 +172,7 @@ def safe_convert_to_int(value, default: int = 0) -> int:
         if isinstance(value, (int, float)):
             return int(value)
         elif isinstance(value, str):
-            # Сначала пробуем преобразовать в float, затем в int
+            # Сначала пробуем преобразовать в float, затем в int (округляем)
             return int(float(value))
         else:
             return default
