@@ -598,6 +598,10 @@ class DatabaseQueries:
     async def adjust_data_for_new_settings(self, symbol: str, analysis_hours: int, offset_minutes: int) -> Dict:
         """Корректировка данных под новые настройки анализа"""
         try:
+            # Безопасное преобразование параметров
+            analysis_hours = max(1, int(analysis_hours)) if analysis_hours is not None else 1
+            offset_minutes = max(0, int(offset_minutes)) if offset_minutes is not None else 0
+            
             # Рассчитываем требуемый диапазон времени
             current_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
             offset_ms = offset_minutes * 60 * 1000
@@ -609,6 +613,8 @@ class DatabaseQueries:
             
             result = {
                 'symbol': symbol,
+                'analysis_hours': analysis_hours,
+                'offset_minutes': offset_minutes,
                 'required_start': start_time_ms,
                 'required_end': end_time_ms,
                 'current_earliest': current_range['earliest_time'],

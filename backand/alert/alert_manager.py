@@ -631,10 +631,20 @@ class AlertManager:
             self.settings['priority_alerts_enabled'] = safe_bool_convert(new_settings['PRIORITY_ALERTS_ENABLED'])
         
         if 'ANALYSIS_HOURS' in new_settings:
-            self.settings['analysis_hours'] = safe_int_convert(new_settings['ANALYSIS_HOURS'], 1)
+            try:
+                # Безопасное преобразование через float для обработки дробных значений
+                self.settings['analysis_hours'] = max(1, int(float(new_settings['ANALYSIS_HOURS'])))
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение ANALYSIS_HOURS: {new_settings['ANALYSIS_HOURS']}, используется значение по умолчанию: 1")
+                self.settings['analysis_hours'] = 1
         
         if 'OFFSET_MINUTES' in new_settings:
-            self.settings['offset_minutes'] = safe_int_convert(new_settings['OFFSET_MINUTES'], 0)
+            try:
+                # Безопасное преобразование через float для обработки дробных значений
+                self.settings['offset_minutes'] = max(0, int(float(new_settings['OFFSET_MINUTES'])))
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение OFFSET_MINUTES: {new_settings['OFFSET_MINUTES']}, используется значение по умолчанию: 0")
+                self.settings['offset_minutes'] = 0
         
         if 'VOLUME_MULTIPLIER' in new_settings:
             self.settings['volume_multiplier'] = safe_float_convert(new_settings['VOLUME_MULTIPLIER'], 2.0)
