@@ -374,9 +374,9 @@ def _safe_reload_in_thread():
                                 future = asyncio.run_coroutine_threadsafe(callback(new_settings), _main_loop)
                                 try:
                                     # Ждем выполнения с таймаутом
-                                    future.result(timeout=10.0)
+                                    future.result(timeout=30.0)  # Увеличиваем таймаут для корректировки данных
                                 except concurrent.futures.TimeoutError:
-                                    print(f"⚠️ Таймаут выполнения асинхронного callback")
+                                    print(f"⚠️ Таймаут выполнения асинхронного callback (30с)")
                                 except Exception as e:
                                     print(f"❌ Ошибка выполнения асинхронного callback: {e}")
                             else:

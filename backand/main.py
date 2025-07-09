@@ -55,6 +55,13 @@ async def update_all_components_settings(new_settings: Dict):
     try:
         logger.info("🔄 Обновление настроек во всех компонентах...")
 
+        # Проверяем изменения в настройках анализа данных
+        analysis_settings_changed = any(key in new_settings for key in ['ANALYSIS_HOURS', 'OFFSET_MINUTES'])
+        
+        if analysis_settings_changed and db_queries:
+            logger.info("📊 Обнаружены изменения в настройках анализа данных")
+            asyncio.create_task(adjust_data_for_settings_change(new_settings))
+
         # Обновляем настройки в alert_manager
         if alert_manager:
             alert_manager.update_settings(new_settings)
@@ -82,6 +89,138 @@ async def update_all_components_settings(new_settings: Dict):
 
     except Exception as e:
         logger.error(f"❌ Ошибка обновления настроек в компонентах: {e}")
+
+
+async def adjust_data_for_settings_change(new_settings: Dict):
+    """Корректировка данных в БД при изменении настроек анализа"""
+    try:
+        if not db_queries:
+            logger.warning("⚠️ База данных недоступна для корректировки данных")
+            return
+        
+        # Получаем новые значения настроек
+        analysis_hours = int(new_settings.get('ANALYSIS_HOURS', get_setting('ANALYSIS_HOURS', 1)))
+        offset_minutes = int(new_settings.get('OFFSET_MINUTES', get_setting('OFFSET_MINUTES', 0)))
+        
+        logger.info(f"🔧 Корректировка данных для новых настроек: {analysis_hours}ч + {offset_minutes}мин")
+        
+        # Получаем текущий watchlist
+        watchlist = await db_queries.get_watchlist()
+        
+        if not watchlist:
+            logger.info("📋 Watchlist пуст - нет данных для корректировки")
+            return
+        
+        # Корректируем данные для каждого символа
+        total_symbols = len(watchlist)
+        processed_symbols = 0
+        
+        for symbol in watchlist:
+            try:
+                # Корректируем данные для символа
+                result = await db_queries.adjust_data_for_new_settings(symbol, analysis_hours, offset_minutes)
+                
+                processed_symbols += 1
+                
+                # Логируем результат
+                if result.get('actions_taken'):
+                    actions_str = ', '.join(result['actions_taken'])
+                    logger.info(f"📊 {symbol} ({processed_symbols}/{total_symbols}): {actions_str}")
+                
+                # Если нужна загрузка данных, запускаем её
+                if any('needs_loading' in action for action in result.get('actions_taken', [])):
+                    asyncio.create_task(load_missing_data_for_symbol(symbol, analysis_hours, offset_minutes))
+                
+                # Небольшая задержка между символами
+                await asyncio.sleep(0.1)
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка корректировки данных для {symbol}: {e}")
+                continue
+        
+        # Уведомляем клиентов о завершении корректировки
+        if connection_manager:
+            await connection_manager.broadcast_json({
+                "type": "data_adjustment_completed",
+                "analysis_hours": analysis_hours,
+                "offset_minutes": offset_minutes,
+                "processed_symbols": processed_symbols,
+                "total_symbols": total_symbols,
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
+        
+        logger.info(f"✅ Корректировка данных завершена для {processed_symbols} символов")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка корректировки данных при изменении настроек: {e}")
+
+
+async def load_missing_data_for_symbol(symbol: str, analysis_hours: int, offset_minutes: int):
+    """Загрузка недостающих данных для символа"""
+    try:
+        if not bybit_api or not db_queries:
+            logger.warning(f"⚠️ API или БД недоступны для загрузки данных {symbol}")
+            return
+        
+        # Рассчитываем диапазон загрузки
+        current_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        offset_ms = offset_minutes * 60 * 1000
+        end_time_ms = current_time_ms - offset_ms
+        start_time_ms = end_time_ms - (analysis_hours * 60 * 60 * 1000)
+        
+        logger.info(f"📥 Загрузка недостающих данных для {symbol}")
+        
+        # Загружаем данные пакетами по 24 часа
+        batch_size_hours = 24
+        current_start = start_time_ms
+        loaded_count = 0
+        
+        while current_start < end_time_ms:
+            current_end = min(current_start + (batch_size_hours * 60 * 60 * 1000), end_time_ms)
+            
+            try:
+                klines = await bybit_api.get_kline_data(symbol, current_start, current_end)
+                
+                for kline in klines:
+                    # Проверяем, существует ли уже эта свеча
+                    exists = await db_queries.check_candle_exists(symbol, kline['timestamp'])
+                    
+                    if not exists:
+                        kline_data = {
+                            'start': kline['timestamp'],
+                            'end': kline['timestamp'] + 60000,
+                            'open': kline['open'],
+                            'high': kline['high'],
+                            'low': kline['low'],
+                            'close': kline['close'],
+                            'volume': kline['volume']
+                        }
+                        
+                        await db_queries.save_historical_kline_data(symbol, kline_data)
+                        loaded_count += 1
+                
+                logger.debug(f"📊 Загружено {len(klines)} свечей для {symbol} в диапазоне {current_start}-{current_end}")
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка загрузки пакета данных для {symbol}: {e}")
+            
+            current_start = current_end
+            await asyncio.sleep(0.1)  # Задержка между пакетами
+        
+        if loaded_count > 0:
+            logger.info(f"✅ Загружено {loaded_count} новых свечей для {symbol}")
+            
+            # Уведомляем клиентов о загрузке данных
+            if connection_manager:
+                await connection_manager.broadcast_json({
+                    "type": "data_loaded",
+                    "symbol": symbol,
+                    "loaded_count": loaded_count,
+                    "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+                })
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки недостающих данных для {symbol}: {e}")
 
 
 class WatchlistAdd(BaseModel):
@@ -996,23 +1135,6 @@ async def import_settings_endpoint(import_data: SettingsImport):
 
 
 @app.delete("/api/watchlist/{symbol}")
-@app.post("/api/settings/reload")
-async def reload_settings_endpoint():
-    """Принудительная перезагрузка настроек из .env файла"""
-    try:
-        from settings import reload_settings, load_settings
-        await reload_settings()
-        
-        # Обновляем настройки во всех компонентах
-        new_settings = load_settings()
-        await update_all_components_settings(new_settings)
-
-        return {"status": "success", "message": "Настройки перезагружены из .env файла"}
-    except Exception as e:
-        logger.error(f"Ошибка перезагрузки настроек: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 async def remove_from_watchlist(symbol: str):
     """Удалить торговую пару из watchlist"""
     try:
@@ -1043,6 +1165,23 @@ async def remove_from_watchlist(symbol: str):
             "status": "error",
             "message": f"Ошибка удаления из watchlist: {str(e)}"
         }
+
+
+@app.post("/api/settings/reload")
+async def reload_settings_endpoint():
+    """Принудительная перезагрузка настроек из .env файла"""
+    try:
+        from settings import reload_settings, load_settings
+        await reload_settings()
+        
+        # Обновляем настройки во всех компонентах
+        new_settings = load_settings()
+        await update_all_components_settings(new_settings)
+
+        return {"status": "success", "message": "Настройки перезагружены из .env файла"}
+    except Exception as e:
+        logger.error(f"Ошибка перезагрузки настроек: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Проверяем существование директории dist перед монтированием
