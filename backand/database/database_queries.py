@@ -392,6 +392,180 @@ class DatabaseQueries:
             logger.error(f"Ошибка очистки будущих свечей для {symbol}: {e}")
             return 0
 
+    async def get_latest_closed_candle_time(self, symbol: str) -> Optional[int]:
+        """Получение времени последней закрытой свечи для символа"""
+        try:
+            query = """
+            SELECT MAX(start_time) as latest_time
+            FROM kline_data 
+            WHERE symbol = %s AND is_closed = true
+            """
+            result = await self.db_connection.execute_query(query, (symbol,))
+            
+            if result and result[0]['latest_time']:
+                return result[0]['latest_time']
+            return None
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения времени последней свечи для {symbol}: {e}")
+            return None
+
+    async def calculate_required_data_range(self, analysis_hours: int, offset_minutes: int) -> Dict:
+        """Расчет требуемого диапазона данных от последней закрытой свечи"""
+        try:
+            # Текущее время
+            current_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            
+            # Время последней закрытой минутной свечи (округляем вниз до минуты)
+            last_closed_minute = (current_time_ms // 60000) * 60000
+            
+            # Применяем смещение
+            offset_ms = offset_minutes * 60 * 1000
+            end_time_ms = last_closed_minute - offset_ms
+            
+            # Рассчитываем начало периода
+            analysis_duration_ms = analysis_hours * 60 * 60 * 1000
+            start_time_ms = end_time_ms - analysis_duration_ms
+            
+            # Ожидаемое количество свечей (минутные интервалы)
+            expected_candles = analysis_hours * 60
+            
+            return {
+                'start_time_ms': start_time_ms,
+                'end_time_ms': end_time_ms,
+                'last_closed_minute': last_closed_minute,
+                'expected_candles': expected_candles,
+                'analysis_hours': analysis_hours,
+                'offset_minutes': offset_minutes
+            }
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета требуемого диапазона данных: {e}")
+            return {}
+
+    async def check_startup_data_integrity(self, symbol: str, analysis_hours: int, offset_minutes: int) -> Dict:
+        """Проверка целостности данных при запуске для символа"""
+        try:
+            # Рассчитываем требуемый диапазон
+            required_range = await self.calculate_required_data_range(analysis_hours, offset_minutes)
+            if not required_range:
+                return {'symbol': symbol, 'status': 'error', 'error': 'Failed to calculate range'}
+            
+            start_time_ms = required_range['start_time_ms']
+            end_time_ms = required_range['end_time_ms']
+            expected_candles = required_range['expected_candles']
+            
+            # Получаем текущее состояние данных
+            current_range = await self.get_data_time_range(symbol)
+            
+            # Проверяем целостность в требуемом диапазоне
+            integrity = await self.check_data_integrity_range(symbol, start_time_ms, end_time_ms)
+            
+            result = {
+                'symbol': symbol,
+                'required_start': start_time_ms,
+                'required_end': end_time_ms,
+                'expected_candles': expected_candles,
+                'current_candles': integrity['total_existing'],
+                'missing_candles': integrity['missing_count'],
+                'integrity_percentage': integrity['integrity_percentage'],
+                'current_earliest': current_range['earliest_time'],
+                'current_latest': current_range['latest_time'],
+                'current_total': current_range['total_count'],
+                'actions_needed': []
+            }
+            
+            # Определяем необходимые действия
+            
+            # 1. Удаление старых данных (раньше требуемого начала)
+            if current_range['earliest_time'] and current_range['earliest_time'] < start_time_ms:
+                old_data_count = await self.db_connection.execute_query(
+                    "SELECT COUNT(*) as count FROM kline_data WHERE symbol = %s AND start_time < %s AND is_closed = true",
+                    (symbol, start_time_ms)
+                )
+                if old_data_count and old_data_count[0]['count'] > 0:
+                    result['actions_needed'].append({
+                        'action': 'delete_old_data',
+                        'count': old_data_count[0]['count'],
+                        'before_time': start_time_ms
+                    })
+            
+            # 2. Удаление будущих данных (позже требуемого конца)
+            if current_range['latest_time'] and current_range['latest_time'] > end_time_ms:
+                future_data_count = await self.db_connection.execute_query(
+                    "SELECT COUNT(*) as count FROM kline_data WHERE symbol = %s AND start_time > %s AND is_closed = true",
+                    (symbol, end_time_ms)
+                )
+                if future_data_count and future_data_count[0]['count'] > 0:
+                    result['actions_needed'].append({
+                        'action': 'delete_future_data',
+                        'count': future_data_count[0]['count'],
+                        'after_time': end_time_ms
+                    })
+            
+            # 3. Загрузка недостающих данных
+            if integrity['missing_count'] > 0:
+                result['actions_needed'].append({
+                    'action': 'load_missing_data',
+                    'count': integrity['missing_count'],
+                    'start_time': start_time_ms,
+                    'end_time': end_time_ms
+                })
+            
+            # Определяем статус
+            if not result['actions_needed']:
+                result['status'] = 'ok'
+            elif integrity['integrity_percentage'] >= 95:
+                result['status'] = 'minor_issues'
+            else:
+                result['status'] = 'needs_correction'
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Ошибка проверки целостности данных при запуске для {symbol}: {e}")
+            return {
+                'symbol': symbol,
+                'status': 'error',
+                'error': str(e),
+                'actions_needed': []
+            }
+
+    async def execute_startup_data_corrections(self, symbol: str, actions: List[Dict]) -> Dict:
+        """Выполнение корректировок данных при запуске"""
+        try:
+            result = {
+                'symbol': symbol,
+                'actions_executed': [],
+                'total_deleted': 0,
+                'total_loaded': 0
+            }
+            
+            for action in actions:
+                action_type = action['action']
+                
+                if action_type == 'delete_old_data':
+                    deleted = await self.cleanup_old_candles_before_time(symbol, action['before_time'])
+                    result['actions_executed'].append(f"deleted_old: {deleted}")
+                    result['total_deleted'] += deleted
+                    logger.info(f"🧹 Удалено {deleted} старых свечей для {symbol}")
+                
+                elif action_type == 'delete_future_data':
+                    deleted = await self.cleanup_future_candles_after_time(symbol, action['after_time'])
+                    result['actions_executed'].append(f"deleted_future: {deleted}")
+                    result['total_deleted'] += deleted
+                    logger.info(f"🧹 Удалено {deleted} будущих свечей для {symbol}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Ошибка выполнения корректировок для {symbol}: {e}")
+            return {
+                'symbol': symbol,
+                'error': str(e),
+                'actions_executed': []
+            }
+
     async def get_data_time_range(self, symbol: str) -> Dict:
         """Получение временного диапазона данных для символа"""
         try:
