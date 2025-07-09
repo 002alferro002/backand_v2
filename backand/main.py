@@ -48,6 +48,148 @@ async def get_settings_schema_endpoint():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Функция для обновления настроек во всех компонентах
+async def update_all_components_settings(new_settings: Dict):
+    """Обновление настроек во всех компонентах системы"""
+    try:
+        logger.info("🔄 Обновление настроек во всех компонентах...")
+
+        # Обновляем настройки в alert_manager
+        if alert_manager:
+            alert_manager.update_settings(new_settings)
+
+        # Обновляем настройки в price_filter
+        if price_filter:
+            price_filter.update_settings(new_settings)
+
+        # Обновляем настройки в telegram_bot
+        if telegram_bot:
+            telegram_token = new_settings.get('TELEGRAM_BOT_TOKEN')
+            telegram_chat = new_settings.get('TELEGRAM_CHAT_ID')
+            if telegram_token or telegram_chat:
+                telegram_bot.update_settings(telegram_token, telegram_chat)
+
+        # Корректируем данные при изменении настроек анализа
+        if db_queries and any(key in new_settings for key in ['ANALYSIS_HOURS', 'OFFSET_MINUTES']):
+            try:
+                await correct_data_for_settings_change(new_settings)
+            except Exception as e:
+                logger.error(f"❌ Ошибка корректировки данных при изменении настроек: {e}")
+
+        # Уведомляем клиентов об обновлении настроек
+        if connection_manager:
+            await connection_manager.broadcast_json({
+                "type": "settings_updated",
+                "message": "Настройки обновлены из .env файла",
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
+
+        logger.info("✅ Настройки успешно обновлены во всех компонентах")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка обновления настроек в компонентах: {e}")
+
+
+async def correct_data_for_settings_change(new_settings: Dict):
+    """Корректировка данных при изменении настроек анализа"""
+    try:
+        # Безопасное преобразование настроек
+        analysis_hours = safe_convert_to_int(new_settings.get('ANALYSIS_HOURS', get_setting('ANALYSIS_HOURS', 1)))
+        offset_minutes = safe_convert_to_int(new_settings.get('OFFSET_MINUTES', get_setting('OFFSET_MINUTES', 0)))
+        
+        logger.info(f"🔧 Корректировка данных для новых настроек: ANALYSIS_HOURS={analysis_hours}, OFFSET_MINUTES={offset_minutes}")
+        
+        # Получаем watchlist
+        watchlist = await db_queries.get_watchlist()
+        if not watchlist:
+            logger.info("📋 Watchlist пуст - корректировка данных не требуется")
+            return
+        
+        # Уведомляем клиентов о начале корректировки
+        if connection_manager:
+            await connection_manager.broadcast_json({
+                "type": "data_correction_started",
+                "symbols_count": len(watchlist),
+                "analysis_hours": analysis_hours,
+                "offset_minutes": offset_minutes,
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
+        
+        corrected_count = 0
+        for symbol in watchlist:
+            try:
+                result = await db_queries.adjust_data_for_new_settings(symbol, analysis_hours, offset_minutes)
+                
+                if result.get('actions_taken'):
+                    corrected_count += 1
+                    logger.info(f"📊 Данные скорректированы для {symbol}: {result['actions_taken']}")
+                    
+                    # Уведомляем о прогрессе
+                    if connection_manager:
+                        await connection_manager.broadcast_json({
+                            "type": "data_correction_progress",
+                            "symbol": symbol,
+                            "actions": result['actions_taken'],
+                            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+                        })
+                
+                # Небольшая задержка между символами
+                await asyncio.sleep(0.1)
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка корректировки данных для {symbol}: {e}")
+                continue
+        
+        # Уведомляем о завершении
+        if connection_manager:
+            await connection_manager.broadcast_json({
+                "type": "data_correction_completed",
+                "corrected_symbols": corrected_count,
+                "total_symbols": len(watchlist),
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
+        
+        logger.info(f"✅ Корректировка данных завершена: {corrected_count}/{len(watchlist)} символов")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка корректировки данных при изменении настроек: {e}")
+        if connection_manager:
+            await connection_manager.broadcast_json({
+                "type": "data_correction_error",
+                "error": str(e),
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
+
+
+def safe_convert_to_int(value, default: int = 0) -> int:
+    """Безопасное преобразование значения в int"""
+    try:
+        if isinstance(value, (int, float)):
+            return int(value)
+        elif isinstance(value, str):
+            # Сначала пробуем преобразовать в float, затем в int
+            return int(float(value))
+        else:
+            return default
+    except (ValueError, TypeError):
+        logger.warning(f"Не удалось преобразовать '{value}' в int, используется значение по умолчанию: {default}")
+        return default
+
+
+def safe_convert_to_float(value, default: float = 0.0) -> float:
+    """Безопасное преобразование значения в float"""
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        elif isinstance(value, str):
+            return float(value)
+        else:
+            return default
+    except (ValueError, TypeError):
+        logger.warning(f"Не удалось преобразовать '{value}' в float, используется значение по умолчанию: {default}")
+        return default
+
+
 @app.post("/api/settings")
 async def update_settings(settings_update: SettingsUpdate):
     """Обновить настройки анализатора"""
@@ -255,6 +397,10 @@ async def reload_settings_endpoint():
     except Exception as e:
         logger.error(f"Ошибка перезагрузки настроек: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class WatchlistAdd(BaseModel):
+    symbol: str
 
 
 # Проверяем существование директории dist перед монтированием
