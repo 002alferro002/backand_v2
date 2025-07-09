@@ -226,18 +226,31 @@ class PriceFilter:
         from cryptoscan.backand.settings import get_setting
 
         # Обновляем настройки
-        self.price_history_days = new_settings.get('PRICE_HISTORY_DAYS',
-                                                   get_setting('PRICE_HISTORY_DAYS', self.price_history_days))
-        self.price_drop_percentage = new_settings.get('PRICE_DROP_PERCENTAGE',
-                                                      get_setting('PRICE_DROP_PERCENTAGE', self.price_drop_percentage))
-        self.pairs_check_interval_minutes = new_settings.get('PAIRS_CHECK_INTERVAL_MINUTES',
-                                                             get_setting('PAIRS_CHECK_INTERVAL_MINUTES',
-                                                                         self.pairs_check_interval_minutes))
+        if 'PRICE_HISTORY_DAYS' in new_settings:
+            try:
+                self.price_history_days = int(new_settings['PRICE_HISTORY_DAYS'])
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение PRICE_HISTORY_DAYS: {new_settings['PRICE_HISTORY_DAYS']}")
+        
+        if 'PRICE_DROP_PERCENTAGE' in new_settings:
+            try:
+                self.price_drop_percentage = float(new_settings['PRICE_DROP_PERCENTAGE'])
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение PRICE_DROP_PERCENTAGE: {new_settings['PRICE_DROP_PERCENTAGE']}")
+        
+        if 'PAIRS_CHECK_INTERVAL_MINUTES' in new_settings:
+            try:
+                self.pairs_check_interval_minutes = int(new_settings['PAIRS_CHECK_INTERVAL_MINUTES'])
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение PAIRS_CHECK_INTERVAL_MINUTES: {new_settings['PAIRS_CHECK_INTERVAL_MINUTES']}")
 
         # Обновляем настройку автообновления watchlist
         old_auto_update = self.watchlist_auto_update
-        self.watchlist_auto_update = new_settings.get('WATCHLIST_AUTO_UPDATE',
-                                                      get_setting('WATCHLIST_AUTO_UPDATE', self.watchlist_auto_update))
+        if 'WATCHLIST_AUTO_UPDATE' in new_settings:
+            try:
+                self.watchlist_auto_update = bool(new_settings['WATCHLIST_AUTO_UPDATE']) if isinstance(new_settings['WATCHLIST_AUTO_UPDATE'], bool) else str(new_settings['WATCHLIST_AUTO_UPDATE']).lower() == 'true'
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение WATCHLIST_AUTO_UPDATE: {new_settings['WATCHLIST_AUTO_UPDATE']}")
 
         # Если автообновление было включено, запускаем фильтр
         if not old_auto_update and self.watchlist_auto_update and not self.is_running:

@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Dict, Any
 import asyncio
 import time
+from datetime import datetime
 
 try:
     from watchdog.observers import Observer
@@ -292,6 +293,11 @@ def get_setting(key: str, default: Any = None) -> Any:
 def update_setting(key: str, value: Any):
     """Обновление настройки в .env файле"""
     global _settings_cache
+    
+    try:
+        logger = logging.getLogger(__name__)
+    except:
+        logger = None
 
     # Преобразуем значение в строку, обрабатывая булевы значения
     if isinstance(value, bool):
@@ -305,6 +311,9 @@ def update_setting(key: str, value: Any):
     # Обновляем кэш
     _settings_cache[key] = str_value
 
+    if logger:
+        logger.info(f"⚙️ Настройка {key} обновлена на {str_value}")
+
     # Перезаписываем .env файл
     with open(ENV_FILE_PATH, 'w', encoding='utf-8') as f:
         f.write("# Настройки CryptoScan\n")
@@ -314,12 +323,6 @@ def update_setting(key: str, value: Any):
             if not key.startswith('#'):
                 f.write(f"{key}={value}\n")
 
-    try:
-        logger = logging.getLogger(__name__)
-        logger.info(f"⚙️ Настройка {key} обновлена на {str_value}")
-    except:
-        print(f"⚙️ Настройка {key} обновлена на {str_value}")
-
     # Принудительно очищаем кэш для следующего чтения
     global _last_modified
     _last_modified = 0
@@ -327,6 +330,59 @@ def update_setting(key: str, value: Any):
 
     # Уведомляем о необходимости перезагрузки настроек
     asyncio.create_task(reload_settings())
+    
+    return True
+
+
+def update_multiple_settings(settings_dict: Dict[str, Any]) -> bool:
+    """Обновление нескольких настроек одновременно"""
+    global _settings_cache
+    
+    try:
+        logger = logging.getLogger(__name__)
+    except:
+        logger = None
+    
+    # Загружаем текущие настройки
+    current_settings = load_settings()
+    
+    # Обновляем настройки
+    for key, value in settings_dict.items():
+        if isinstance(value, bool):
+            str_value = 'True' if value else 'False'
+        else:
+            str_value = str(value)
+        
+        current_settings[key] = str_value
+        _settings_cache[key] = str_value
+
+        if logger:
+            logger.info(f"⚙️ Настройка {key} обновлена на {str_value}")
+    
+    # Перезаписываем .env файл одним разом
+    try:
+        with open(ENV_FILE_PATH, 'w', encoding='utf-8') as f:
+            f.write("# Настройки CryptoScan\n")
+            f.write(f"# Обновлено автоматически: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+            for key, value in current_settings.items():
+                if not key.startswith('#'):
+                    f.write(f"{key}={value}\n")
+        
+        # Принудительно очищаем кэш
+        global _last_modified
+        _last_modified = 0
+        _settings_cache = {}
+        
+        # Уведомляем о необходимости перезагрузки настроек
+        asyncio.create_task(reload_settings())
+        
+        return True
+        
+    except Exception as e:
+        if logger:
+            logger.error(f"❌ Ошибка записи настроек в файл: {e}")
+        return False
 
 
 # Инициализация настроек при импорте модуля

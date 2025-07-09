@@ -776,9 +776,12 @@ async def test_trading_connection(credentials: dict):
 async def update_settings(settings_update: SettingsUpdate):
     """Обновить настройки анализатора"""
     try:
-        from settings import update_setting
+        from settings import update_setting, update_multiple_settings
 
         settings = settings_update.settings
+        
+        # Подготавливаем плоский словарь настроек для обновления
+        flat_settings = {}
 
         # Обрабатываем настройки
         for key, value in settings.items():
@@ -786,38 +789,87 @@ async def update_settings(settings_update: SettingsUpdate):
                 # Для вложенных настроек
                 for sub_key, sub_value in value.items():
                     # Преобразуем ключ в формат переменной окружения
-                    env_key = f"{key.upper()}_{sub_key.upper()}" if key != 'server' and key != 'database' else sub_key.upper()
-                    logger.info(f"Обновление настройки {env_key} = {sub_value}")
-                    update_setting(env_key, sub_value)
+                    if key == 'server':
+                        env_key = f"SERVER_{sub_key.upper()}"
+                    elif key == 'database':
+                        env_key = f"DB_{sub_key.upper()}" if sub_key != 'url' else 'DATABASE_URL'
+                    elif key == 'volume_analyzer':
+                        env_key = sub_key.upper()
+                    elif key == 'price_filter':
+                        env_key = sub_key.upper()
+                    elif key == 'alerts':
+                        env_key = sub_key.upper()
+                    elif key == 'imbalance':
+                        env_key = sub_key.upper()
+                    elif key == 'trading':
+                        env_key = sub_key.upper()
+                    elif key == 'bybit':
+                        env_key = f"BYBIT_{sub_key.upper()}"
+                    elif key == 'logging':
+                        env_key = f"LOG_{sub_key.upper()}" if sub_key != 'level' else 'LOG_LEVEL'
+                    elif key == 'websocket':
+                        env_key = f"WS_{sub_key.upper()}"
+                    elif key == 'orderbook':
+                        env_key = f"ORDERBOOK_{sub_key.upper()}"
+                    elif key == 'telegram':
+                        if sub_key == 'bot_token':
+                            env_key = 'TELEGRAM_BOT_TOKEN'
+                        elif sub_key == 'chat_id':
+                            env_key = 'TELEGRAM_CHAT_ID'
+                        else:
+                            env_key = f"TELEGRAM_{sub_key.upper()}"
+                    else:
+                        env_key = f"{key.upper()}_{sub_key.upper()}"
+                    
+                    flat_settings[env_key] = sub_value
             else:
                 env_key = key.upper()
-                logger.info(f"Обновление настройки {env_key} = {value}")
-                update_setting(env_key, value)
+                flat_settings[env_key] = value
+        
+        # Обновляем все настройки одним вызовом
+        success = update_multiple_settings(flat_settings)
+        
+        if not success:
+            return {"status": "error", "message": "Ошибка сохранения настроек в файл"}
 
         # Принудительно перезагружаем настройки
         from settings import reload_settings
         await reload_settings()
 
-        # Обновляем настройки во всех компонентах
-        flat_settings = {}
-        for key, value in settings.items():
-            if isinstance(value, dict):
-                for sub_key, sub_value in value.items():
-                    flat_settings[f"{key.upper()}_{sub_key.upper()}"] = sub_value
-            else:
-                flat_settings[key.upper()] = value
-
+        # Обновляем настройки во всех компонентах системы
         await update_all_components_settings(flat_settings)
 
+        # Уведомляем клиентов об успешном обновлении
         await connection_manager.broadcast_json({
             "type": "settings_updated",
+            "status": "success",
             "data": settings,
-            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "message": "Настройки успешно обновлены и сохранены"
         })
-        return {"status": "success", "settings": settings}
+        
+        logger.info("✅ Настройки успешно обновлены через API")
+        return {
+            "status": "success", 
+            "settings": settings,
+            "message": "Настройки успешно обновлены и сохранены"
+        }
+        
     except Exception as e:
         logger.error(f"Ошибка обновления настроек: {e}")
-        return {"status": "error", "message": str(e), "detail": str(e)}
+        
+        # Уведомляем клиентов об ошибке
+        await connection_manager.broadcast_json({
+            "type": "settings_update_error",
+            "error": str(e),
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+        })
+        
+        return {
+            "status": "error", 
+            "message": f"Ошибка обновления настроек: {str(e)}", 
+            "detail": str(e)
+        }
 
 
 @app.delete("/api/watchlist/{symbol}")

@@ -244,19 +244,34 @@ class ImbalanceAnalyzer:
     def update_settings(self, new_settings: Dict):
         """Обновление настроек анализатора"""
         if 'MIN_GAP_PERCENTAGE' in new_settings:
-            self.min_gap_percentage = new_settings['MIN_GAP_PERCENTAGE']
+            try:
+                self.min_gap_percentage = float(new_settings['MIN_GAP_PERCENTAGE'])
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение MIN_GAP_PERCENTAGE: {new_settings['MIN_GAP_PERCENTAGE']}")
         
         if 'MIN_STRENGTH' in new_settings:
-            self.min_strength = new_settings['MIN_STRENGTH']
+            try:
+                self.min_strength = float(new_settings['MIN_STRENGTH'])
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение MIN_STRENGTH: {new_settings['MIN_STRENGTH']}")
         
         if 'FAIR_VALUE_GAP_ENABLED' in new_settings:
-            self.fair_value_gap_enabled = new_settings['FAIR_VALUE_GAP_ENABLED']
+            try:
+                self.fair_value_gap_enabled = bool(new_settings['FAIR_VALUE_GAP_ENABLED']) if isinstance(new_settings['FAIR_VALUE_GAP_ENABLED'], bool) else str(new_settings['FAIR_VALUE_GAP_ENABLED']).lower() == 'true'
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение FAIR_VALUE_GAP_ENABLED: {new_settings['FAIR_VALUE_GAP_ENABLED']}")
         
         if 'ORDER_BLOCK_ENABLED' in new_settings:
-            self.order_block_enabled = new_settings['ORDER_BLOCK_ENABLED']
+            try:
+                self.order_block_enabled = bool(new_settings['ORDER_BLOCK_ENABLED']) if isinstance(new_settings['ORDER_BLOCK_ENABLED'], bool) else str(new_settings['ORDER_BLOCK_ENABLED']).lower() == 'true'
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение ORDER_BLOCK_ENABLED: {new_settings['ORDER_BLOCK_ENABLED']}")
         
         if 'BREAKER_BLOCK_ENABLED' in new_settings:
-            self.breaker_block_enabled = new_settings['BREAKER_BLOCK_ENABLED']
+            try:
+                self.breaker_block_enabled = bool(new_settings['BREAKER_BLOCK_ENABLED']) if isinstance(new_settings['BREAKER_BLOCK_ENABLED'], bool) else str(new_settings['BREAKER_BLOCK_ENABLED']).lower() == 'true'
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение BREAKER_BLOCK_ENABLED: {new_settings['BREAKER_BLOCK_ENABLED']}")
         
         logger.info("⚙️ Настройки анализатора имбалансов обновлены")
 

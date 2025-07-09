@@ -238,15 +238,27 @@ class AlertValidators:
     def update_settings(self, new_settings: Dict):
         """Обновление настроек валидаторов"""
         if 'MIN_VOLUME_USDT' in new_settings:
-            self.min_volume_usdt = new_settings['MIN_VOLUME_USDT']
+            try:
+                self.min_volume_usdt = float(new_settings['MIN_VOLUME_USDT'])
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение MIN_VOLUME_USDT: {new_settings['MIN_VOLUME_USDT']}")
 
         if 'VOLUME_MULTIPLIER' in new_settings:
-            self.volume_multiplier = new_settings['VOLUME_MULTIPLIER']
+            try:
+                self.volume_multiplier = float(new_settings['VOLUME_MULTIPLIER'])
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение VOLUME_MULTIPLIER: {new_settings['VOLUME_MULTIPLIER']}")
 
         if 'CONSECUTIVE_LONG_COUNT' in new_settings:
-            self.consecutive_long_count = new_settings['CONSECUTIVE_LONG_COUNT']
+            try:
+                self.consecutive_long_count = int(new_settings['CONSECUTIVE_LONG_COUNT'])
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение CONSECUTIVE_LONG_COUNT: {new_settings['CONSECUTIVE_LONG_COUNT']}")
 
         if 'ALERT_GROUPING_MINUTES' in new_settings:
-            self.alert_grouping_minutes = new_settings['ALERT_GROUPING_MINUTES']
+            try:
+                self.alert_grouping_minutes = int(new_settings['ALERT_GROUPING_MINUTES'])
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение ALERT_GROUPING_MINUTES: {new_settings['ALERT_GROUPING_MINUTES']}")
 
         logger.info("⚙️ Настройки валидаторов алертов обновлены")

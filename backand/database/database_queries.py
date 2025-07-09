@@ -215,13 +215,22 @@ class DatabaseQueries:
                                           offset_minutes: int = 0, volume_type: str = 'long') -> List[float]:
         """Получение исторических объемов LONG свечей"""
         try:
-            # Преобразуем все параметры в числа для избежания ошибок типов
-            hours_int = int(hours) if not isinstance(hours, int) else hours
-            offset_minutes_int = int(offset_minutes) if not isinstance(offset_minutes, int) else offset_minutes
+            # Безопасное преобразование параметров в числа
+            try:
+                hours_int = int(float(hours)) if hours is not None else 1
+            except (ValueError, TypeError):
+                hours_int = 1
+                logger.warning(f"Некорректное значение hours: {hours}, используется значение по умолчанию: 1")
+            
+            try:
+                offset_minutes_int = int(float(offset_minutes)) if offset_minutes is not None else 0
+            except (ValueError, TypeError):
+                offset_minutes_int = 0
+                logger.warning(f"Некорректное значение offset_minutes: {offset_minutes}, используется значение по умолчанию: 0")
 
             current_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
             offset_ms = offset_minutes_int * 60 * 1000
-            start_time_ms = current_time_ms - (hours * 60 * 60 * 1000) - offset_ms
+            start_time_ms = current_time_ms - (hours_int * 60 * 60 * 1000) - offset_ms
             end_time_ms = current_time_ms - offset_ms
 
             if volume_type.lower() == 'long':
@@ -257,6 +266,7 @@ class DatabaseQueries:
 
         except Exception as e:
             logger.error(f"Ошибка получения исторических объемов для {symbol}: {e}")
+            logger.error(f"Параметры: hours={hours} (type: {type(hours)}), offset_minutes={offset_minutes} (type: {type(offset_minutes)})")
             return []
 
     async def check_candle_exists(self, symbol: str, timestamp: int) -> bool:

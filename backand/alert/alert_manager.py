@@ -598,38 +598,85 @@ class AlertManager:
 
     def update_settings(self, new_settings: Dict):
         """Обновление настроек"""
-        # Обновляем настройки из переданного словаря или из конфигурации
-        updated_settings = {}
-
-        # Список ключей настроек, которые нужно обновить
-        setting_keys = [
-            'VOLUME_ALERTS_ENABLED', 'CONSECUTIVE_ALERTS_ENABLED', 'PRIORITY_ALERTS_ENABLED',
-            'ANALYSIS_HOURS', 'OFFSET_MINUTES', 'VOLUME_MULTIPLIER', 'MIN_VOLUME_USDT',
-            'CONSECUTIVE_LONG_COUNT', 'ALERT_GROUPING_MINUTES', 'DATA_RETENTION_HOURS',
-            'UPDATE_INTERVAL_SECONDS', 'NOTIFICATION_ENABLED', 'VOLUME_TYPE',
-            'ORDERBOOK_ENABLED', 'ORDERBOOK_SNAPSHOT_ON_ALERT', 'IMBALANCE_ENABLED',
-            'FAIR_VALUE_GAP_ENABLED', 'ORDER_BLOCK_ENABLED', 'BREAKER_BLOCK_ENABLED',
-            'PAIRS_CHECK_INTERVAL_MINUTES'
-        ]
-
-        # Обновляем настройки из переданного словаря или загружаем из конфигурации
-        for key in setting_keys:
-            if key in new_settings:
-                # Преобразуем ключ в формат настроек
-                setting_key = key.lower()
-                updated_settings[setting_key] = new_settings[key]
-            else:
-                # Загружаем из конфигурации
-                from cryptoscan.backand.settings import get_setting
-                setting_key = key.lower()
-                updated_settings[setting_key] = get_setting(key, self.settings.get(setting_key))
-
-        # Обновляем настройки
-        self.settings.update(updated_settings)
+        # Безопасное обновление настроек с проверкой типов
+        def safe_bool_convert(value):
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.lower() in ('true', '1', 'yes', 'on')
+            return bool(value)
+        
+        def safe_int_convert(value, default=0):
+            try:
+                return int(float(value))
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное числовое значение: {value}, используется {default}")
+                return default
+        
+        def safe_float_convert(value, default=0.0):
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                logger.warning(f"Некорректное значение с плавающей точкой: {value}, используется {default}")
+                return default
+        
+        # Обновляем настройки с безопасным преобразованием типов
+        if 'VOLUME_ALERTS_ENABLED' in new_settings:
+            self.settings['volume_alerts_enabled'] = safe_bool_convert(new_settings['VOLUME_ALERTS_ENABLED'])
+        
+        if 'CONSECUTIVE_ALERTS_ENABLED' in new_settings:
+            self.settings['consecutive_alerts_enabled'] = safe_bool_convert(new_settings['CONSECUTIVE_ALERTS_ENABLED'])
+        
+        if 'PRIORITY_ALERTS_ENABLED' in new_settings:
+            self.settings['priority_alerts_enabled'] = safe_bool_convert(new_settings['PRIORITY_ALERTS_ENABLED'])
+        
+        if 'ANALYSIS_HOURS' in new_settings:
+            self.settings['analysis_hours'] = safe_int_convert(new_settings['ANALYSIS_HOURS'], 1)
+        
+        if 'OFFSET_MINUTES' in new_settings:
+            self.settings['offset_minutes'] = safe_int_convert(new_settings['OFFSET_MINUTES'], 0)
+        
+        if 'VOLUME_MULTIPLIER' in new_settings:
+            self.settings['volume_multiplier'] = safe_float_convert(new_settings['VOLUME_MULTIPLIER'], 2.0)
+        
+        if 'MIN_VOLUME_USDT' in new_settings:
+            self.settings['min_volume_usdt'] = safe_int_convert(new_settings['MIN_VOLUME_USDT'], 1000)
+        
+        if 'CONSECUTIVE_LONG_COUNT' in new_settings:
+            self.settings['consecutive_long_count'] = safe_int_convert(new_settings['CONSECUTIVE_LONG_COUNT'], 5)
+        
+        if 'ALERT_GROUPING_MINUTES' in new_settings:
+            self.settings['alert_grouping_minutes'] = safe_int_convert(new_settings['ALERT_GROUPING_MINUTES'], 5)
+        
+        if 'DATA_RETENTION_HOURS' in new_settings:
+            self.settings['data_retention_hours'] = safe_int_convert(new_settings['DATA_RETENTION_HOURS'], 2)
+        
+        if 'UPDATE_INTERVAL_SECONDS' in new_settings:
+            self.settings['update_interval_seconds'] = safe_int_convert(new_settings['UPDATE_INTERVAL_SECONDS'], 1)
+        
+        if 'NOTIFICATION_ENABLED' in new_settings:
+            self.settings['notification_enabled'] = safe_bool_convert(new_settings['NOTIFICATION_ENABLED'])
+        
+        if 'VOLUME_TYPE' in new_settings:
+            volume_type = str(new_settings['VOLUME_TYPE']).lower()
+            if volume_type in ['long', 'short', 'all']:
+                self.settings['volume_type'] = volume_type
+        
+        if 'ORDERBOOK_ENABLED' in new_settings:
+            self.settings['orderbook_enabled'] = safe_bool_convert(new_settings['ORDERBOOK_ENABLED'])
+        
+        if 'ORDERBOOK_SNAPSHOT_ON_ALERT' in new_settings:
+            self.settings['orderbook_snapshot_on_alert'] = safe_bool_convert(new_settings['ORDERBOOK_SNAPSHOT_ON_ALERT'])
+        
+        if 'IMBALANCE_ENABLED' in new_settings:
+            self.settings['imbalance_enabled'] = safe_bool_convert(new_settings['IMBALANCE_ENABLED'])
+        
+        if 'PAIRS_CHECK_INTERVAL_MINUTES' in new_settings:
+            self.settings['pairs_check_interval_minutes'] = safe_int_convert(new_settings['PAIRS_CHECK_INTERVAL_MINUTES'], 30)
 
         # Обновляем настройки компонентов
-        self.validators.update_settings(updated_settings)
-        self.imbalance_analyzer.update_settings(updated_settings)
+        self.validators.update_settings(new_settings)
+        self.imbalance_analyzer.update_settings(new_settings)
 
         logger.info(f"⚙️ Настройки AlertManager обновлены")
 
