@@ -1429,3 +1429,14 @@ if __name__ == "__main__":
         reload=False,
         log_level="info"
     )
+
+def setup_api_routes(app: FastAPI):
+    """Настройка всех API маршрутов"""
+    global db_queries
+    
+    # Подключаем маршруты для работы с данными
+    app.include_router(setup_alerts_routes(db_queries))
+    app.include_router(setup_watchlist_routes(db_queries))
+    app.include_router(setup_favorites_routes(db_queries))
+    app.include_router(setup_trading_routes(db_queries))
+    app.include_router(setup_kline_routes(db_queries))
