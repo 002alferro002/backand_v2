@@ -587,6 +587,18 @@ class AlertManager:
                 elif alert_data['alert_type'] == AlertType.PRIORITY.value:
                     await self.telegram_bot.send_priority_alert(alert_data)
 
+            # Сохраняем в базу данных
+            if self.db_queries:
+                try:
+                    alert_id = await self.db_queries.save_alert(alert_data)
+                    if alert_id:
+                        alert_data['id'] = alert_id
+                        logger.info(f"💾 Алерт сохранен в БД с ID: {alert_id}")
+                    else:
+                        logger.warning("⚠️ Не удалось сохранить алерт в БД")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка сохранения алерта в БД: {e}")
+
             logger.info(f"✅ Алерт отправлен: {alert_data['symbol']} - {alert_data['alert_type']}")
 
         except Exception as e:

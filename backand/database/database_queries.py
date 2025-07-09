@@ -1,3 +1,4 @@
+import json
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timezone, timedelta
 from cryptoscan.backand.core.core_logger import get_logger
@@ -668,3 +669,340 @@ class DatabaseQueries:
                 'error': str(e),
                 'actions_taken': ['error']
             }
+    # Методы для работы с алертами
+    async def save_alert(self, alert_data: Dict) -> int:
+        """Сохранение алерта в базу данных"""
+        try:
+            query = """
+            INSERT INTO alerts (
+                symbol, alert_type, price, volume_ratio, current_volume_usdt, 
+                average_volume_usdt, consecutive_count, alert_timestamp_ms, 
+                close_timestamp_ms, is_closed, is_true_signal, has_imbalance,
+                imbalance_data, candle_data, order_book_snapshot, message, status
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """
+            
+            result = await self.db_connection.execute_command_with_return(query, (
+                alert_data['symbol'],
+                alert_data['alert_type'],
+                alert_data['price'],
+                alert_data.get('volume_ratio'),
+                alert_data.get('current_volume_usdt'),
+                alert_data.get('average_volume_usdt'),
+                alert_data.get('consecutive_count'),
+                alert_data['timestamp'],
+                alert_data.get('close_timestamp'),
+                alert_data.get('is_closed', False),
+                alert_data.get('is_true_signal'),
+                alert_data.get('has_imbalance', False),
+                json.dumps(alert_data.get('imbalance_data')) if alert_data.get('imbalance_data') else None,
+                json.dumps(alert_data.get('candle_data')) if alert_data.get('candle_data') else None,
+                json.dumps(alert_data.get('order_book_snapshot')) if alert_data.get('order_book_snapshot') else None,
+                alert_data.get('message', ''),
+                alert_data.get('status', 'active')
+            ))
+            
+            return result['id'] if result else None
+            
+        except Exception as e:
+            logger.error(f"Ошибка сохранения алерта: {e}")
+            raise DatabaseException(f"Ошибка сохранения алерта: {e}")
+
+    async def get_alerts(self, limit: int = 100, offset: int = 0, symbol: str = None, 
+                        alert_type: str = None, status: str = None) -> List[Dict]:
+        """Получение алертов с фильтрацией"""
+        try:
+            conditions = []
+            params = []
+            
+            if symbol:
+                conditions.append("symbol = %s")
+                params.append(symbol)
+            
+            if alert_type:
+                conditions.append("alert_type = %s")
+                params.append(alert_type)
+            
+            if status:
+                conditions.append("status = %s")
+                params.append(status)
+            
+            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+            
+            query = f"""
+            SELECT * FROM alerts
+            {where_clause}
+            ORDER BY alert_timestamp_ms DESC
+            LIMIT %s OFFSET %s
+            """
+            
+            params.extend([limit, offset])
+            result = await self.db_connection.execute_query(query, tuple(params))
+            
+            alerts = []
+            for row in result:
+                alert = dict(row)
+                # Парсим JSON поля
+                if alert['imbalance_data']:
+                    alert['imbalance_data'] = json.loads(alert['imbalance_data'])
+                if alert['candle_data']:
+                    alert['candle_data'] = json.loads(alert['candle_data'])
+                if alert['order_book_snapshot']:
+                    alert['order_book_snapshot'] = json.loads(alert['order_book_snapshot'])
+                alerts.append(alert)
+            
+            return alerts
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения алертов: {e}")
+            return []
+
+    async def get_alert_by_id(self, alert_id: int) -> Optional[Dict]:
+        """Получение алерта по ID"""
+        try:
+            query = "SELECT * FROM alerts WHERE id = %s"
+            result = await self.db_connection.execute_query(query, (alert_id,))
+            
+            if result:
+                alert = dict(result[0])
+                # Парсим JSON поля
+                if alert['imbalance_data']:
+                    alert['imbalance_data'] = json.loads(alert['imbalance_data'])
+                if alert['candle_data']:
+                    alert['candle_data'] = json.loads(alert['candle_data'])
+                if alert['order_book_snapshot']:
+                    alert['order_book_snapshot'] = json.loads(alert['order_book_snapshot'])
+                return alert
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения алерта {alert_id}: {e}")
+            return None
+
+    async def update_alert_status(self, alert_id: int, status: str, is_true_signal: bool = None) -> bool:
+        """Обновление статуса алерта"""
+        try:
+            if is_true_signal is not None:
+                query = "UPDATE alerts SET status = %s, is_true_signal = %s WHERE id = %s"
+                params = (status, is_true_signal, alert_id)
+            else:
+                query = "UPDATE alerts SET status = %s WHERE id = %s"
+                params = (status, alert_id)
+            
+            rows_affected = await self.db_connection.execute_command(query, params)
+            return rows_affected > 0
+            
+        except Exception as e:
+            logger.error(f"Ошибка обновления статуса алерта {alert_id}: {e}")
+            return False
+
+    async def delete_alert(self, alert_id: int) -> bool:
+        """Удаление алерта"""
+        try:
+            query = "DELETE FROM alerts WHERE id = %s"
+            rows_affected = await self.db_connection.execute_command(query, (alert_id,))
+            return rows_affected > 0
+            
+        except Exception as e:
+            logger.error(f"Ошибка удаления алерта {alert_id}: {e}")
+            return False
+
+    async def get_alerts_statistics(self, days: int = 7) -> Dict:
+        """Получение статистики алертов"""
+        try:
+            cutoff_time = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+            
+            query = """
+            SELECT 
+                COUNT(*) as total_alerts,
+                COUNT(CASE WHEN alert_type = 'volume_spike' THEN 1 END) as volume_alerts,
+                COUNT(CASE WHEN alert_type = 'consecutive_long' THEN 1 END) as consecutive_alerts,
+                COUNT(CASE WHEN alert_type = 'priority' THEN 1 END) as priority_alerts,
+                COUNT(CASE WHEN is_true_signal = true THEN 1 END) as true_signals,
+                COUNT(CASE WHEN is_true_signal = false THEN 1 END) as false_signals,
+                COUNT(CASE WHEN has_imbalance = true THEN 1 END) as alerts_with_imbalance,
+                AVG(volume_ratio) as avg_volume_ratio
+            FROM alerts 
+            WHERE alert_timestamp_ms >= %s
+            """
+            
+            result = await self.db_connection.execute_query(query, (cutoff_time,))
+            
+            if result:
+                stats = dict(result[0])
+                # Рассчитываем процент точности
+                total_closed = (stats['true_signals'] or 0) + (stats['false_signals'] or 0)
+                if total_closed > 0:
+                    stats['accuracy_percentage'] = round((stats['true_signals'] or 0) / total_closed * 100, 2)
+                else:
+                    stats['accuracy_percentage'] = 0
+                
+                return stats
+            
+            return {}
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения статистики алертов: {e}")
+            return {}
+
+    # Методы для работы с избранными парами
+    async def get_favorites(self) -> List[Dict]:
+        """Получение избранных пар"""
+        try:
+            query = "SELECT * FROM favorites ORDER BY sort_order, symbol"
+            result = await self.db_connection.execute_query(query)
+            return [dict(row) for row in result]
+        except Exception as e:
+            logger.error(f"Ошибка получения избранных: {e}")
+            return []
+
+    async def add_to_favorites(self, symbol: str, notes: str = '', color: str = '#FFD700', sort_order: int = 0) -> int:
+        """Добавление в избранное"""
+        try:
+            query = """
+            INSERT INTO favorites (symbol, notes, color, sort_order)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (symbol) DO UPDATE SET
+                notes = EXCLUDED.notes,
+                color = EXCLUDED.color,
+                sort_order = EXCLUDED.sort_order,
+                updated_at = NOW()
+            RETURNING id
+            """
+            
+            result = await self.db_connection.execute_command_with_return(
+                query, (symbol, notes, color, sort_order)
+            )
+            return result['id'] if result else None
+            
+        except Exception as e:
+            logger.error(f"Ошибка добавления в избранное {symbol}: {e}")
+            raise DatabaseException(f"Ошибка добавления в избранное: {e}")
+
+    async def remove_from_favorites(self, favorite_id: int = None, symbol: str = None) -> bool:
+        """Удаление из избранного"""
+        try:
+            if favorite_id:
+                query = "DELETE FROM favorites WHERE id = %s"
+                params = (favorite_id,)
+            elif symbol:
+                query = "DELETE FROM favorites WHERE symbol = %s"
+                params = (symbol,)
+            else:
+                raise ValueError("Необходимо указать favorite_id или symbol")
+            
+            rows_affected = await self.db_connection.execute_command(query, params)
+            return rows_affected > 0
+            
+        except Exception as e:
+            logger.error(f"Ошибка удаления из избранного: {e}")
+            return False
+
+    async def update_favorite(self, favorite_id: int, symbol: str = None, notes: str = None, 
+                             color: str = None, sort_order: int = None) -> bool:
+        """Обновление избранного"""
+        try:
+            updates = []
+            params = []
+            
+            if symbol is not None:
+                updates.append("symbol = %s")
+                params.append(symbol)
+            if notes is not None:
+                updates.append("notes = %s")
+                params.append(notes)
+            if color is not None:
+                updates.append("color = %s")
+                params.append(color)
+            if sort_order is not None:
+                updates.append("sort_order = %s")
+                params.append(sort_order)
+            
+            if not updates:
+                return False
+            
+            updates.append("updated_at = NOW()")
+            params.append(favorite_id)
+            
+            query = f"UPDATE favorites SET {', '.join(updates)} WHERE id = %s"
+            rows_affected = await self.db_connection.execute_command(query, tuple(params))
+            return rows_affected > 0
+            
+        except Exception as e:
+            logger.error(f"Ошибка обновления избранного {favorite_id}: {e}")
+            return False
+
+    # Методы для работы с торговыми настройками
+    async def get_trading_settings(self) -> Dict:
+        """Получение торговых настроек"""
+        try:
+            query = "SELECT * FROM trading_settings ORDER BY id DESC LIMIT 1"
+            result = await self.db_connection.execute_query(query)
+            
+            if result:
+                return dict(result[0])
+            
+            # Возвращаем настройки по умолчанию
+            return {
+                'account_balance': 10000.0,
+                'max_risk_per_trade': 2.0,
+                'max_open_trades': 5,
+                'default_stop_loss_percentage': 2.0,
+                'default_take_profit_percentage': 4.0,
+                'auto_calculate_quantity': True
+            }
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения торговых настроек: {e}")
+            return {}
+
+    async def update_trading_settings(self, settings: Dict) -> bool:
+        """Обновление торговых настроек"""
+        try:
+            # Проверяем, есть ли уже настройки
+            existing = await self.get_trading_settings()
+            
+            if existing and 'id' in existing:
+                # Обновляем существующие
+                updates = []
+                params = []
+                
+                for key, value in settings.items():
+                    if key != 'id':
+                        updates.append(f"{key} = %s")
+                        params.append(value)
+                
+                if updates:
+                    updates.append("updated_at = NOW()")
+                    params.append(existing['id'])
+                    
+                    query = f"UPDATE trading_settings SET {', '.join(updates)} WHERE id = %s"
+                    rows_affected = await self.db_connection.execute_command(query, tuple(params))
+                    return rows_affected > 0
+            else:
+                # Создаем новые
+                query = """
+                INSERT INTO trading_settings (
+                    account_balance, max_risk_per_trade, max_open_trades,
+                    default_stop_loss_percentage, default_take_profit_percentage,
+                    auto_calculate_quantity
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """
+                
+                await self.db_connection.execute_command(query, (
+                    settings.get('account_balance', 10000.0),
+                    settings.get('max_risk_per_trade', 2.0),
+                    settings.get('max_open_trades', 5),
+                    settings.get('default_stop_loss_percentage', 2.0),
+                    settings.get('default_take_profit_percentage', 4.0),
+                    settings.get('auto_calculate_quantity', True)
+                ))
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Ошибка обновления торговых настроек: {e}")
+            return False
