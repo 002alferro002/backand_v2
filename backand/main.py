@@ -223,6 +223,208 @@ async def load_missing_data_for_symbol(symbol: str, analysis_hours: int, offset_
         logger.error(f"❌ Ошибка загрузки недостающих данных для {symbol}: {e}")
 
 
+async def check_and_correct_startup_data():
+    """Проверка и корректировка данных при запуске системы"""
+    try:
+        if not db_queries:
+            logger.warning("⚠️ База данных недоступна для проверки данных при запуске")
+            return
+        
+        logger.info("🔍 Проверка целостности данных при запуске...")
+        
+        # Получаем текущие настройки
+        analysis_hours = get_setting('ANALYSIS_HOURS', 1)
+        offset_minutes = get_setting('OFFSET_MINUTES', 0)
+        
+        # Безопасное преобразование в числа
+        try:
+            analysis_hours = int(float(analysis_hours))
+            offset_minutes = int(float(offset_minutes))
+        except (ValueError, TypeError):
+            logger.error("❌ Некорректные настройки ANALYSIS_HOURS или OFFSET_MINUTES")
+            return
+        
+        logger.info(f"📊 Проверка данных для периода: {analysis_hours}ч + {offset_minutes}мин смещения")
+        
+        # Получаем watchlist
+        watchlist = await db_queries.get_watchlist()
+        
+        if not watchlist:
+            logger.info("📋 Watchlist пуст - нет данных для проверки")
+            return
+        
+        total_symbols = len(watchlist)
+        processed_symbols = 0
+        symbols_needing_correction = 0
+        symbols_needing_loading = 0
+        
+        # Уведомляем клиентов о начале проверки
+        if connection_manager:
+            await connection_manager.broadcast_json({
+                "type": "startup_data_check_started",
+                "total_symbols": total_symbols,
+                "analysis_hours": analysis_hours,
+                "offset_minutes": offset_minutes,
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
+        
+        # Проверяем каждый символ
+        for symbol in watchlist:
+            try:
+                processed_symbols += 1
+                
+                # Проверяем целостность данных
+                integrity_check = await db_queries.check_startup_data_integrity(
+                    symbol, analysis_hours, offset_minutes
+                )
+                
+                status = integrity_check.get('status', 'error')
+                actions_needed = integrity_check.get('actions_needed', [])
+                
+                # Логируем результат проверки
+                if status == 'ok':
+                    logger.info(f"✅ {symbol} ({processed_symbols}/{total_symbols}): данные в порядке")
+                elif status == 'minor_issues':
+                    logger.info(f"🟡 {symbol} ({processed_symbols}/{total_symbols}): незначительные проблемы")
+                elif status == 'needs_correction':
+                    logger.info(f"🔧 {symbol} ({processed_symbols}/{total_symbols}): требуется корректировка")
+                    symbols_needing_correction += 1
+                else:
+                    logger.error(f"❌ {symbol} ({processed_symbols}/{total_symbols}): ошибка проверки")
+                    continue
+                
+                # Выполняем корректировки если нужно
+                if actions_needed:
+                    # Выполняем удаление данных
+                    delete_actions = [a for a in actions_needed if a['action'].startswith('delete_')]
+                    if delete_actions:
+                        correction_result = await db_queries.execute_startup_data_corrections(
+                            symbol, delete_actions
+                        )
+                        
+                        if correction_result.get('total_deleted', 0) > 0:
+                            logger.info(f"🧹 {symbol}: удалено {correction_result['total_deleted']} свечей")
+                    
+                    # Запускаем загрузку недостающих данных
+                    load_actions = [a for a in actions_needed if a['action'] == 'load_missing_data']
+                    if load_actions:
+                        symbols_needing_loading += 1
+                        # Запускаем загрузку в фоне
+                        asyncio.create_task(
+                            load_missing_startup_data(symbol, analysis_hours, offset_minutes, load_actions[0])
+                        )
+                
+                # Уведомляем клиентов о прогрессе
+                if connection_manager and processed_symbols % 10 == 0:  # Каждые 10 символов
+                    await connection_manager.broadcast_json({
+                        "type": "startup_data_check_progress",
+                        "processed": processed_symbols,
+                        "total": total_symbols,
+                        "current_symbol": symbol,
+                        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+                    })
+                
+                # Небольшая задержка между символами
+                await asyncio.sleep(0.05)
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка проверки данных для {symbol}: {e}")
+                continue
+        
+        # Итоговый отчет
+        logger.info(f"✅ Проверка данных завершена:")
+        logger.info(f"   📊 Проверено символов: {processed_symbols}")
+        logger.info(f"   🔧 Требуют корректировки: {symbols_needing_correction}")
+        logger.info(f"   📥 Требуют загрузки данных: {symbols_needing_loading}")
+        
+        # Уведомляем клиентов о завершении
+        if connection_manager:
+            await connection_manager.broadcast_json({
+                "type": "startup_data_check_completed",
+                "processed_symbols": processed_symbols,
+                "symbols_corrected": symbols_needing_correction,
+                "symbols_loading": symbols_needing_loading,
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки данных при запуске: {e}")
+
+
+async def load_missing_startup_data(symbol: str, analysis_hours: int, offset_minutes: int, load_action: Dict):
+    """Загрузка недостающих данных при запуске"""
+    try:
+        if not bybit_api or not db_queries:
+            logger.warning(f"⚠️ API или БД недоступны для загрузки данных {symbol}")
+            return
+        
+        start_time_ms = load_action['start_time']
+        end_time_ms = load_action['end_time']
+        missing_count = load_action['count']
+        
+        logger.info(f"📥 Загрузка {missing_count} недостающих свечей для {symbol}")
+        
+        # Уведомляем клиентов о начале загрузки
+        if connection_manager:
+            await connection_manager.broadcast_json({
+                "type": "startup_data_loading_started",
+                "symbol": symbol,
+                "missing_count": missing_count,
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
+        
+        # Загружаем данные пакетами
+        batch_size_hours = 24
+        current_start = start_time_ms
+        loaded_count = 0
+        
+        while current_start < end_time_ms:
+            current_end = min(current_start + (batch_size_hours * 60 * 60 * 1000), end_time_ms)
+            
+            try:
+                klines = await bybit_api.get_kline_data(symbol, current_start, current_end)
+                
+                for kline in klines:
+                    # Проверяем, что свеча в нужном диапазоне и не существует
+                    if start_time_ms <= kline['timestamp'] < end_time_ms:
+                        exists = await db_queries.check_candle_exists(symbol, kline['timestamp'])
+                        
+                        if not exists:
+                            kline_data = {
+                                'start': kline['timestamp'],
+                                'end': kline['timestamp'] + 60000,
+                                'open': kline['open'],
+                                'high': kline['high'],
+                                'low': kline['low'],
+                                'close': kline['close'],
+                                'volume': kline['volume']
+                            }
+                            
+                            await db_queries.save_historical_kline_data(symbol, kline_data)
+                            loaded_count += 1
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка загрузки пакета для {symbol}: {e}")
+            
+            current_start = current_end
+            await asyncio.sleep(0.1)
+        
+        logger.info(f"✅ Загружено {loaded_count} свечей для {symbol} при запуске")
+        
+        # Уведомляем клиентов о завершении загрузки
+        if connection_manager:
+            await connection_manager.broadcast_json({
+                "type": "startup_data_loading_completed",
+                "symbol": symbol,
+                "loaded_count": loaded_count,
+                "expected_count": missing_count,
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки данных при запуске для {symbol}: {e}")
+
+
 class WatchlistAdd(BaseModel):
     symbol: str
 
@@ -451,6 +653,12 @@ async def lifespan(app: FastAPI):
 
         # Запуск периодической очистки WebSocket соединений
         asyncio.create_task(connection_manager.start_periodic_cleanup())
+
+        # Запускаем проверку и корректировку данных при запуске
+        if db_initialized:
+            asyncio.create_task(check_and_correct_startup_data())
+        else:
+            logger.warning("⚠️ Проверка данных при запуске пропущена - база данных недоступна")
 
         # Регистрируем callback для обновления настроек
         register_settings_callback(update_all_components_settings)

@@ -299,7 +299,7 @@ class DatabaseQueries:
             existing_count = result[0]['existing_count']
 
             # Ожидаемое количество свечей (минутные интервалы)
-            expected_count = hours * 60
+            expected_count = max(1, hours * 60)  # Минимум 1 свеча
 
             integrity_percentage = (existing_count / expected_count * 100) if expected_count > 0 else 0
 
@@ -335,7 +335,7 @@ class DatabaseQueries:
             existing_count = result[0]['existing_count']
 
             # Ожидаемое количество свечей в диапазоне
-            expected_count = (end_time_ms - start_time_ms) // 60000
+            expected_count = max(1, (end_time_ms - start_time_ms) // 60000)  # Минимум 1 свеча
 
             integrity_percentage = (existing_count / expected_count * 100) if expected_count > 0 else 0
 
