@@ -1,6 +1,7 @@
 import os
 import threading
 import asyncio
+import concurrent.futures
 from pathlib import Path
 from typing import Dict, Any, Callable, List
 from datetime import datetime
@@ -26,6 +27,7 @@ _last_modified = 0
 _settings_callbacks = []
 _file_observer = None
 _reload_lock = threading.Lock()
+_main_loop = None  # Ссылка на главный event loop
 
 # Настройки по умолчанию
 DEFAULT_SETTINGS = {
@@ -344,6 +346,12 @@ SETTINGS_SCHEMA = {
 }
 
 
+def set_main_event_loop(loop):
+    """Установка ссылки на главный event loop"""
+    global _main_loop
+    _main_loop = loop
+
+
 def _safe_reload_in_thread():
     """Безопасная перезагрузка настроек в отдельном потоке"""
     def reload_thread():
@@ -359,21 +367,23 @@ def _safe_reload_in_thread():
                 # Уведомляем все зарегистрированные компоненты
                 for callback in _settings_callbacks:
                     try:
-                        # Проверяем, есть ли активный event loop
-                        try:
-                            loop = asyncio.get_running_loop()
-                            if loop and not loop.is_closed():
-                                # Если есть активный loop, планируем выполнение
-                                asyncio.run_coroutine_threadsafe(callback(new_settings), loop)
+                        if asyncio.iscoroutinefunction(callback):
+                            # Асинхронный callback
+                            if _main_loop and not _main_loop.is_closed():
+                                # Планируем выполнение в главном event loop
+                                future = asyncio.run_coroutine_threadsafe(callback(new_settings), _main_loop)
+                                try:
+                                    # Ждем выполнения с таймаутом
+                                    future.result(timeout=10.0)
+                                except concurrent.futures.TimeoutError:
+                                    print(f"⚠️ Таймаут выполнения асинхронного callback")
+                                except Exception as e:
+                                    print(f"❌ Ошибка выполнения асинхронного callback: {e}")
                             else:
-                                # Если нет активного loop, пропускаем асинхронный callback
-                                print(f"⚠️ Пропущен callback - нет активного event loop")
-                        except RuntimeError:
-                            # Нет активного event loop - пропускаем асинхронные callbacks
-                            if not asyncio.iscoroutinefunction(callback):
-                                callback(new_settings)
-                            else:
-                                print(f"⚠️ Пропущен асинхронный callback - нет активного event loop")
+                                print(f"⚠️ Главный event loop недоступен для асинхронного callback")
+                        else:
+                            # Синхронный callback
+                            callback(new_settings)
                                 
                     except Exception as e:
                         print(f"❌ Ошибка обновления настроек в компоненте: {e}")
@@ -396,6 +406,7 @@ class SettingsFileHandler(FileSystemEventHandler):
             return
 
         if event.src_path == str(ENV_FILE_PATH):
+            print(f"📝 Обнаружено изменение .env файла: {event.src_path}")
             # Используем безопасную перезагрузку в отдельном потоке
             _safe_reload_in_thread()
 
@@ -513,7 +524,7 @@ async def reload_settings():
                 except Exception as e:
                     print(f"❌ Ошибка обновления настроек в компоненте: {e}")
 
-            print(f"✅ Настройки перезагружены из .env файла")
+            print(f"✅ Настройки перезагружены из .env файла (асинхронно)")
 
     except Exception as e:
         print(f"❌ Ошибка перезагрузки настроек: {e}")
@@ -544,7 +555,7 @@ def start_settings_monitor():
             _file_observer = Observer()
             _file_observer.schedule(event_handler, str(BASE_DIR), recursive=False)
             _file_observer.start()
-            print("🔍 Мониторинг изменений .env файла запущен")
+            print(f"🔍 Мониторинг изменений .env файла запущен (watchdog)")
     except Exception as e:
         print(f"❌ Ошибка запуска мониторинга настроек: {e}")
 

@@ -190,6 +190,10 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("🚀 Запуск системы анализа объемов...")
 
+        # КРИТИЧЕСКИ ВАЖНО: Устанавливаем ссылку на главный event loop
+        from settings import set_main_event_loop
+        set_main_event_loop(asyncio.get_running_loop())
+
         # КРИТИЧЕСКИ ВАЖНО: Создаем .env файл в первую очередь
         from settings import create_env_file, load_settings
         create_env_file()  # Создаем файл настроек если его нет
@@ -331,6 +335,10 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("🛑 Остановка системы...")
+
+    # Очищаем ссылку на event loop
+    from settings import set_main_event_loop
+    set_main_event_loop(None)
 
     # Останавливаем мониторинг настроек
     stop_settings_monitor()
