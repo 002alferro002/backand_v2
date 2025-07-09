@@ -13,7 +13,6 @@ import uvicorn
 import json
 
 # Импорты наших модулей
-from settings import get_setting, register_settings_callback, start_settings_monitor, stop_settings_monitor
 from settings import (
     get_setting, register_settings_callback, start_settings_monitor, stop_settings_monitor,
     get_settings_schema, get_settings_by_category, reset_settings_to_default,
@@ -48,39 +47,6 @@ connection_manager = None
 # Модели данных для API
 class SettingsUpdate(BaseModel):
     settings: Dict[str, Any]
-
-
-class PaperTradeCreate(BaseModel):
-    symbol: str
-    alert_id: Optional[int] = None
-    direction: str  # 'LONG' or 'SHORT'
-    entry_price: float
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
-    quantity: Optional[float] = None
-    risk_amount: Optional[float] = None
-    risk_percentage: Optional[float] = None
-    position_value: Optional[float] = None
-    potential_loss: Optional[float] = None
-    potential_profit: Optional[float] = None
-    risk_reward_ratio: Optional[float] = None
-    status: str = 'planned'
-    notes: Optional[str] = None
-
-
-class RealTradeCreate(BaseModel):
-    symbol: str
-    alert_id: Optional[int] = None
-    side: str  # 'BUY' or 'SELL'
-    direction: str  # 'LONG' or 'SHORT'
-    quantity: float
-    entry_price: float
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
-    leverage: int = 1
-    margin_type: str = 'isolated'
-    risk_amount: Optional[float] = None
-    risk_percentage: Optional[float] = None
 
 
 # Функция для обновления настроек во всех компонентах
@@ -188,6 +154,21 @@ class SettingsReset(BaseModel):
 
 class SettingsUpdate(BaseModel):
     settings: Dict[str, Any]
+
+
+class RealTradeCreate(BaseModel):
+    symbol: str
+    alert_id: Optional[int] = None
+    side: str  # 'BUY' or 'SELL'
+    direction: str  # 'LONG' or 'SHORT'
+    quantity: float
+    entry_price: float
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    leverage: int = 1
+    margin_type: str = 'isolated'
+    risk_amount: Optional[float] = None
+    risk_percentage: Optional[float] = None
 
 
 class RiskCalculatorRequest(BaseModel):

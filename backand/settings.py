@@ -1,1094 +1,746 @@
-import asyncio
 import os
-from datetime import datetime, timezone
-from contextlib import asynccontextmanager
-from typing import List, Dict, Optional, Any, Set, Union
+import threading
+import asyncio
+from pathlib import Path
+from typing import Dict, Any, Callable, List
+from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-import json
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    WATCHDOG_AVAILABLE = True
+except ImportError:
+    WATCHDOG_AVAILABLE = False
+    print("⚠️ Watchdog не установлен. Автоматическое обновление настроек недоступно.")
+    print("Установите: pip install watchdog")
 
-# Импорты наших модулей
-from settings import get_setting, register_settings_callback, start_settings_monitor, stop_settings_monitor
-from settings import (
-    get_setting, register_settings_callback, start_settings_monitor, stop_settings_monitor,
-    get_settings_schema, get_settings_by_category, reset_settings_to_default,
-    export_settings, import_settings, update_multiple_settings, ENV_FILE_PATH
-)
-from core.core_logger import get_logger
-from database.database_connection import DatabaseConnection
-from database.database_tables import DatabaseTables
-from database.database_queries import DatabaseQueries
-from alert.alert_manager import AlertManager
-from bybit.bybit_websocket import BybitWebSocketManager
-from bybit.bybit_rest_api import BybitRestAPI
-from filter.filter_price import PriceFilter
-from telegram.telegram_bot import TelegramBot
-from times.times_manager import TimeManager
-from cryptoscan.backand.websocket.websocket_manager import ConnectionManager
+# Базовый путь проекта
+BASE_DIR = Path(__file__).parent
 
-logger = get_logger(__name__)
+# Путь к .env файлу
+ENV_FILE_PATH = BASE_DIR / '.env'
 
-# Глобальные переменные
-db_connection = None
-db_queries = None
-alert_manager = None
-bybit_websocket = None
-bybit_api = None
-price_filter = None
-telegram_bot = None
-time_manager = None
-connection_manager = None
+# Глобальные переменные для системы обновления настроек
+_settings_cache = {}
+_last_modified = 0
+_settings_callbacks = []
+_file_observer = None
+_reload_lock = threading.Lock()
+
+# Настройки по умолчанию
+DEFAULT_SETTINGS = {
+    # Настройки сервера
+    'SERVER_HOST': '0.0.0.0',
+    'SERVER_PORT': '8000',
+
+    # Настройки базы данных
+    'DATABASE_URL': 'postgresql://user:password@localhost:5432/cryptoscan',
+    'DB_HOST': 'localhost',
+    'DB_PORT': '5432',
+    'DB_NAME': 'cryptoscan',
+    'DB_USER': 'user',
+    'DB_PASSWORD': 'password',
+
+    # Настройки анализа объемов
+    'ANALYSIS_HOURS': '1',
+    'OFFSET_MINUTES': '0',
+    'VOLUME_MULTIPLIER': '2.0',
+    'MIN_VOLUME_USDT': '1000',
+    'CONSECUTIVE_LONG_COUNT': '5',
+    'ALERT_GROUPING_MINUTES': '5',
+    'DATA_RETENTION_HOURS': '2',
+    'UPDATE_INTERVAL_SECONDS': '1',
+    'PAIRS_CHECK_INTERVAL_MINUTES': '30',
+    'PRICE_CHECK_INTERVAL_MINUTES': '5',
+
+    # Настройки фильтра цен
+    'PRICE_HISTORY_DAYS': '30',
+    'PRICE_DROP_PERCENTAGE': '10.0',
+    'WATCHLIST_AUTO_UPDATE': 'True',
+
+    # Настройки Telegram
+    'TELEGRAM_BOT_TOKEN': '',
+    'TELEGRAM_CHAT_ID': '',
+
+    # Настройки Bybit API
+    'BYBIT_API_KEY': '',
+    'BYBIT_API_SECRET': '',
+
+    # Настройки логирования
+    'LOG_LEVEL': 'INFO',
+    'LOG_FILE': 'cryptoscan.log',
+
+    # Настройки WebSocket
+    'WS_PING_INTERVAL': '20',
+    'WS_PING_TIMEOUT': '10',
+    'WS_CLOSE_TIMEOUT': '10',
+    'WS_MAX_SIZE': '10000000',
+
+    # Настройки синхронизации времени
+    'TIME_SYNC_INTERVAL': '300',
+    'TIME_SERVER_SYNC_INTERVAL': '3600',
+
+    # Настройки имбаланса
+    'MIN_GAP_PERCENTAGE': '0.1',
+    'MIN_STRENGTH': '0.5',
+    'FAIR_VALUE_GAP_ENABLED': 'True',
+    'ORDER_BLOCK_ENABLED': 'True',
+    'BREAKER_BLOCK_ENABLED': 'True',
+
+    # Настройки стакана
+    'ORDERBOOK_ENABLED': 'False',
+    'ORDERBOOK_SNAPSHOT_ON_ALERT': 'False',
+
+    # Настройки алертов
+    'VOLUME_ALERTS_ENABLED': 'True',
+    'CONSECUTIVE_ALERTS_ENABLED': 'True',
+    'PRIORITY_ALERTS_ENABLED': 'True',
+    'IMBALANCE_ENABLED': 'True',
+    'NOTIFICATION_ENABLED': 'True',
+    'VOLUME_TYPE': 'long',
+
+    # Настройки социальных сетей
+    'SOCIAL_SENTIMENT_ENABLED': 'False',
+    'SOCIAL_ANALYSIS_PERIOD_HOURS': '72',
+    'SOCIAL_MIN_MENTIONS_FOR_RATING': '3',
+    'SOCIAL_CACHE_DURATION_MINUTES': '30',
+}
+
+# Схема настроек с описаниями и типами
+SETTINGS_SCHEMA = {
+    'server': {
+        'title': 'Настройки сервера',
+        'description': 'Конфигурация веб-сервера',
+        'settings': {
+            'SERVER_HOST': {
+                'type': 'string',
+                'default': '0.0.0.0',
+                'description': 'IP адрес для привязки сервера',
+                'validation': 'ip_address'
+            },
+            'SERVER_PORT': {
+                'type': 'integer',
+                'default': 8000,
+                'description': 'Порт для веб-сервера',
+                'validation': 'port_range'
+            }
+        }
+    },
+    'database': {
+        'title': 'База данных',
+        'description': 'Настройки подключения к PostgreSQL',
+        'settings': {
+            'DATABASE_URL': {
+                'type': 'string',
+                'default': 'postgresql://user:password@localhost:5432/cryptoscan',
+                'description': 'URL подключения к базе данных',
+                'validation': 'database_url'
+            },
+            'DB_HOST': {
+                'type': 'string',
+                'default': 'localhost',
+                'description': 'Хост базы данных'
+            },
+            'DB_PORT': {
+                'type': 'integer',
+                'default': 5432,
+                'description': 'Порт базы данных'
+            },
+            'DB_NAME': {
+                'type': 'string',
+                'default': 'cryptoscan',
+                'description': 'Имя базы данных'
+            },
+            'DB_USER': {
+                'type': 'string',
+                'default': 'user',
+                'description': 'Пользователь базы данных'
+            },
+            'DB_PASSWORD': {
+                'type': 'password',
+                'default': 'password',
+                'description': 'Пароль базы данных'
+            }
+        }
+    },
+    'volume_analysis': {
+        'title': 'Анализ объемов',
+        'description': 'Настройки анализа торговых объемов',
+        'settings': {
+            'ANALYSIS_HOURS': {
+                'type': 'integer',
+                'default': 1,
+                'description': 'Период анализа в часах',
+                'min': 1,
+                'max': 24
+            },
+            'OFFSET_MINUTES': {
+                'type': 'integer',
+                'default': 0,
+                'description': 'Смещение в минутах от текущего времени',
+                'min': 0,
+                'max': 60
+            },
+            'VOLUME_MULTIPLIER': {
+                'type': 'float',
+                'default': 2.0,
+                'description': 'Множитель превышения объема',
+                'min': 1.1,
+                'max': 10.0
+            },
+            'MIN_VOLUME_USDT': {
+                'type': 'integer',
+                'default': 1000,
+                'description': 'Минимальный объем в USDT',
+                'min': 100,
+                'max': 100000
+            },
+            'CONSECUTIVE_LONG_COUNT': {
+                'type': 'integer',
+                'default': 5,
+                'description': 'Количество подряд идущих LONG свечей',
+                'min': 3,
+                'max': 20
+            }
+        }
+    },
+    'alerts': {
+        'title': 'Алерты',
+        'description': 'Настройки системы уведомлений',
+        'settings': {
+            'VOLUME_ALERTS_ENABLED': {
+                'type': 'boolean',
+                'default': True,
+                'description': 'Включить алерты по объему'
+            },
+            'CONSECUTIVE_ALERTS_ENABLED': {
+                'type': 'boolean',
+                'default': True,
+                'description': 'Включить алерты по последовательности'
+            },
+            'PRIORITY_ALERTS_ENABLED': {
+                'type': 'boolean',
+                'default': True,
+                'description': 'Включить приоритетные алерты'
+            },
+            'ALERT_GROUPING_MINUTES': {
+                'type': 'integer',
+                'default': 5,
+                'description': 'Группировка алертов в минутах',
+                'min': 1,
+                'max': 60
+            },
+            'NOTIFICATION_ENABLED': {
+                'type': 'boolean',
+                'default': True,
+                'description': 'Включить уведомления'
+            }
+        }
+    },
+    'telegram': {
+        'title': 'Telegram',
+        'description': 'Настройки Telegram бота',
+        'settings': {
+            'TELEGRAM_BOT_TOKEN': {
+                'type': 'password',
+                'default': '',
+                'description': 'Токен Telegram бота'
+            },
+            'TELEGRAM_CHAT_ID': {
+                'type': 'string',
+                'default': '',
+                'description': 'ID чата для уведомлений'
+            }
+        }
+    },
+    'bybit': {
+        'title': 'Bybit API',
+        'description': 'Настройки API биржи Bybit',
+        'settings': {
+            'BYBIT_API_KEY': {
+                'type': 'password',
+                'default': '',
+                'description': 'API ключ Bybit'
+            },
+            'BYBIT_API_SECRET': {
+                'type': 'password',
+                'default': '',
+                'description': 'Секретный ключ Bybit'
+            }
+        }
+    },
+    'imbalance': {
+        'title': 'Анализ имбалансов',
+        'description': 'Настройки Smart Money анализа',
+        'settings': {
+            'IMBALANCE_ENABLED': {
+                'type': 'boolean',
+                'default': True,
+                'description': 'Включить анализ имбалансов'
+            },
+            'FAIR_VALUE_GAP_ENABLED': {
+                'type': 'boolean',
+                'default': True,
+                'description': 'Анализ Fair Value Gap'
+            },
+            'ORDER_BLOCK_ENABLED': {
+                'type': 'boolean',
+                'default': True,
+                'description': 'Анализ Order Block'
+            },
+            'BREAKER_BLOCK_ENABLED': {
+                'type': 'boolean',
+                'default': True,
+                'description': 'Анализ Breaker Block'
+            },
+            'MIN_GAP_PERCENTAGE': {
+                'type': 'float',
+                'default': 0.1,
+                'description': 'Минимальный процент гэпа',
+                'min': 0.01,
+                'max': 5.0
+            },
+            'MIN_STRENGTH': {
+                'type': 'float',
+                'default': 0.5,
+                'description': 'Минимальная сила сигнала',
+                'min': 0.1,
+                'max': 10.0
+            }
+        }
+    },
+    'watchlist': {
+        'title': 'Watchlist',
+        'description': 'Настройки списка отслеживания',
+        'settings': {
+            'WATCHLIST_AUTO_UPDATE': {
+                'type': 'boolean',
+                'default': True,
+                'description': 'Автоматическое обновление watchlist'
+            },
+            'PRICE_HISTORY_DAYS': {
+                'type': 'integer',
+                'default': 30,
+                'description': 'Период истории цен в днях',
+                'min': 1,
+                'max': 365
+            },
+            'PRICE_DROP_PERCENTAGE': {
+                'type': 'float',
+                'default': 10.0,
+                'description': 'Процент падения цены для добавления в watchlist',
+                'min': 1.0,
+                'max': 90.0
+            },
+            'PAIRS_CHECK_INTERVAL_MINUTES': {
+                'type': 'integer',
+                'default': 30,
+                'description': 'Интервал проверки пар в минутах',
+                'min': 5,
+                'max': 1440
+            }
+        }
+    }
+}
 
 
-# Модели данных для API
-class SettingsUpdate(BaseModel):
-    settings: Dict[str, Any]
-
-
-class PaperTradeCreate(BaseModel):
-    symbol: str
-    alert_id: Optional[int] = None
-    direction: str  # 'LONG' or 'SHORT'
-    entry_price: float
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
-    quantity: Optional[float] = None
-    risk_amount: Optional[float] = None
-    risk_percentage: Optional[float] = None
-    position_value: Optional[float] = None
-    potential_loss: Optional[float] = None
-    potential_profit: Optional[float] = None
-    risk_reward_ratio: Optional[float] = None
-    status: str = 'planned'
-    notes: Optional[str] = None
-
-
-class RealTradeCreate(BaseModel):
-    symbol: str
-    alert_id: Optional[int] = None
-    side: str  # 'BUY' or 'SELL'
-    direction: str  # 'LONG' or 'SHORT'
-    quantity: float
-    entry_price: float
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
-    leverage: int = 1
-    margin_type: str = 'isolated'
-    risk_amount: Optional[float] = None
-    risk_percentage: Optional[float] = None
-
-
-# Функция для обновления настроек во всех компонентах
-async def update_all_components_settings(new_settings: Dict):
-    """Обновление настроек во всех компонентах системы"""
-    try:
-        logger.info("🔄 Обновление настроек во всех компонентах...")
-
-        # Обновляем настройки в alert_manager
-        if alert_manager:
-            alert_manager.update_settings(new_settings)
-
-        # Обновляем настройки в price_filter
-        if price_filter:
-            price_filter.update_settings(new_settings)
-
-        # Обновляем настройки в telegram_bot
-        if telegram_bot:
-            telegram_token = new_settings.get('TELEGRAM_BOT_TOKEN')
-            telegram_chat = new_settings.get('TELEGRAM_CHAT_ID')
-            if telegram_token or telegram_chat:
-                telegram_bot.update_settings(telegram_token, telegram_chat)
-
-        # Уведомляем клиентов об обновлении настроек
-        if connection_manager:
-            await connection_manager.broadcast_json({
-                "type": "settings_updated",
-                "message": "Настройки обновлены из .env файла",
-                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
-            })
-
-        logger.info("✅ Настройки успешно обновлены во всех компонентах")
-
-    except Exception as e:
-        logger.error(f"❌ Ошибка обновления настроек в компонентах: {e}")
-
-
-class WatchlistAdd(BaseModel):
-    symbol: str
-
-
-class WatchlistUpdate(BaseModel):
-    id: int
-    symbol: str
-    is_active: bool
-
-
-class FavoriteAdd(BaseModel):
-    symbol: str
-    notes: Optional[str] = None
-    color: Optional[str] = '#FFD700'
-
-
-class FavoriteUpdate(BaseModel):
-    notes: Optional[str] = None
-    color: Optional[str] = None
-    sort_order: Optional[int] = None
-
-
-class FavoriteReorder(BaseModel):
-    symbol_order: List[str]
-
-
-class PaperTradeCreate(BaseModel):
-    symbol: str
-    trade_type: str  # 'LONG' or 'SHORT'
-    entry_price: float
-    quantity: Optional[float] = None
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
-    risk_amount: Optional[float] = None
-    risk_percentage: Optional[float] = None
-    notes: Optional[str] = None
-    alert_id: Optional[int] = None
-
-
-class PaperTradeClose(BaseModel):
-    exit_price: float
-    exit_reason: Optional[str] = 'MANUAL'
-
-
-class TradingSettingsUpdate(BaseModel):
-    account_balance: Optional[float] = None
-    max_risk_per_trade: Optional[float] = None
-    max_open_trades: Optional[int] = None
-    default_stop_loss_percentage: Optional[float] = None
-    default_take_profit_percentage: Optional[float] = None
-    auto_calculate_quantity: Optional[bool] = None
-
-
-class SettingsSchema(BaseModel):
-    """Модель для получения схемы настроек"""
-    pass
-
-
-class SettingsImport(BaseModel):
-    """Модель для импорта настроек"""
-    settings: Dict[str, Any]
-
-
-class SettingsReset(BaseModel):
-    """Модель для сброса настроек"""
-    confirm: bool = False
-
-
-class SettingsUpdate(BaseModel):
-    settings: Dict[str, Any]
-
-
-class RiskCalculatorRequest(BaseModel):
-    entry_price: float
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
-    risk_amount: Optional[float] = None
-    risk_percentage: Optional[float] = None
-    account_balance: Optional[float] = None
-    trade_type: str = 'LONG'
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    global db_connection, db_queries, alert_manager, bybit_websocket, bybit_api
-    global price_filter, telegram_bot, time_manager, connection_manager
-
-    try:
-        logger.info("🚀 Запуск системы анализа объемов...")
-
-        # КРИТИЧЕСКИ ВАЖНО: Создаем .env файл в первую очередь
-        from settings import create_env_file, load_settings
-        create_env_file()  # Создаем файл настроек если его нет
-        initial_settings = load_settings()  # Загружаем настройки
-        logger.info("✅ Файл настроек создан/загружен")
-
-        # Инициализация менеджера WebSocket соединений
-        connection_manager = ConnectionManager()
-
-        # Инициализация синхронизации времени
-        time_manager = TimeManager()
-        await time_manager.start()
-        logger.info("⏰ Синхронизация времени запущена")
-
-        # Инициализация базы данных с обработкой ошибок
-        db_connection = None
-        db_queries = None
-        db_initialized = False
-        
+def _safe_reload_in_thread():
+    """Безопасная перезагрузка настроек в отдельном потоке"""
+    def reload_thread():
         try:
-            db_connection = DatabaseConnection()
-            await db_connection.initialize()
-
-            # Создание таблиц
-            db_tables = DatabaseTables(db_connection)
-            await db_tables.create_all_tables()
-
-            # Инициализация запросов к БД
-            db_queries = DatabaseQueries(db_connection)
-            db_initialized = True
-            logger.info("✅ База данных инициализирована")
-            
-        except Exception as db_error:
-            logger.error(f"❌ Ошибка инициализации базы данных: {db_error}")
-            logger.warning("⚠️ Система продолжит работу без базы данных")
-            logger.warning("⚠️ Некоторые функции будут недоступны")
-            
-            # Уведомляем через WebSocket о проблеме с БД
-            if connection_manager:
-                await connection_manager.send_system_notification(
-                    "database_error",
-                    {
-                        "message": "Ошибка подключения к базе данных",
-                        "error": str(db_error),
-                        "impact": "Система работает в ограниченном режиме"
-                    }
-                )
-
-        # Инициализация Telegram бота
-        telegram_bot = TelegramBot()
-
-        # Инициализация менеджера алертов (работает и без БД)
-        alert_manager = AlertManager(db_queries, telegram_bot, connection_manager, time_manager)
-
-        # Инициализация Bybit API
-        bybit_api = BybitRestAPI()
-        await bybit_api.start()
-
-        # Инициализация фильтра цен (работает и без БД)
-        price_filter = PriceFilter(db_queries)
-
-        # Инициализация WebSocket менеджера Bybit
-        bybit_websocket = BybitWebSocketManager(alert_manager, connection_manager)
-
-        # Настраиваем callback для обновления пар
-        async def on_pairs_updated(new_pairs, removed_pairs):
-            """Callback для обновления пар в bybit_websocket"""
-            if bybit_websocket:
-                bybit_websocket.update_trading_pairs(new_pairs, removed_pairs)
-                if new_pairs:
-                    await bybit_websocket.subscribe_to_new_pairs(new_pairs)
-                if removed_pairs:
-                    await bybit_websocket.unsubscribe_from_pairs(removed_pairs)
-
-        price_filter.set_pairs_updated_callback(on_pairs_updated)
-
-        # Запуск всех сервисов
-        logger.info("🔄 Запуск сервисов...")
-
-        # Получаем начальный watchlist (только если БД доступна)
-        if db_initialized and db_queries:
-            try:
-                initial_watchlist = await db_queries.get_watchlist()
-                if initial_watchlist:
-                    # Устанавливаем торговые пары в WebSocket менеджер
-                    bybit_websocket.trading_pairs = set(initial_watchlist)
-                    logger.info(f"📋 Установлен начальный watchlist: {len(initial_watchlist)} пар")
-                else:
-                    logger.info("📋 Watchlist пуст")
-            except Exception as e:
-                logger.error(f"❌ Ошибка загрузки watchlist: {e}")
-        else:
-            logger.warning("⚠️ Watchlist недоступен - база данных не инициализирована")
-
-        # Запускаем фильтр цен
-        if get_setting('WATCHLIST_AUTO_UPDATE', True):
-            if db_initialized:
-                asyncio.create_task(price_filter.start())
-            else:
-                logger.warning("⚠️ Автообновление watchlist отключено - база данных недоступна")
-        else:
-            logger.info("🔍 Автоматическое обновление watchlist отключено")
-
-        # Запускаем WebSocket клиент
-        bybit_websocket.is_running = True
-        asyncio.create_task(bybit_websocket_loop())
-
-        # Запускаем загрузчик исторических данных только если БД доступна
-        if db_initialized:
-            asyncio.create_task(historical_data_loader())
-        else:
-            logger.warning("⚠️ Загрузчик исторических данных отключен - база данных недоступна")
-
-        # Запуск периодической очистки данных
-        asyncio.create_task(periodic_cleanup())
-
-        # Запуск периодической очистки WebSocket соединений
-        asyncio.create_task(connection_manager.start_periodic_cleanup())
-
-        # Регистрируем callback для обновления настроек
-        register_settings_callback(update_all_components_settings)
-
-        # Запускаем мониторинг изменений .env файла
-        start_settings_monitor()
-
-        if db_initialized:
-            logger.info("✅ Система успешно запущена в полном режиме!")
-        else:
-            logger.warning("⚠️ Система запущена в ограниченном режиме (без базы данных)")
-            logger.info("💡 Настройте подключение к базе данных в .env файле и перезапустите")
-
-    except Exception as e:
-        logger.error(f"❌ Ошибка запуска системы: {e}")
-        logger.error("❌ Система не может быть запущена")
-        # Не прерываем запуск - позволяем системе работать для настройки
-        pass
-
-    yield
-
-    # Shutdown
-    logger.info("🛑 Остановка системы...")
-
-    # Останавливаем мониторинг настроек
-    stop_settings_monitor()
-
-    if time_manager:
-        await time_manager.stop()
-    if bybit_websocket:
-        bybit_websocket.is_running = False
-        await bybit_websocket.close()
-    if bybit_api:
-        await bybit_api.stop()
-    if price_filter:
-        await price_filter.stop()
-    if db_connection:
-        db_connection.close()
-
-
-async def bybit_websocket_loop():
-    """Цикл WebSocket соединения с переподключениями"""
-    while bybit_websocket.is_running:
-        try:
-            await bybit_websocket.connect()
-            # Если дошли сюда, соединение было успешным
-            bybit_websocket.reconnect_attempts = 0
-
-        except Exception as e:
-            logger.error(f"❌ WebSocket ошибка: {e}")
-
-            if bybit_websocket.is_running:
-                bybit_websocket.reconnect_attempts += 1
-
-                if bybit_websocket.reconnect_attempts <= bybit_websocket.max_reconnect_attempts:
-                    delay = min(bybit_websocket.reconnect_delay * bybit_websocket.reconnect_attempts, 60)
-                    logger.info(f"🔄 Переподключение через {delay} секунд... "
-                                f"(попытка {bybit_websocket.reconnect_attempts}/{bybit_websocket.max_reconnect_attempts})")
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error(f"❌ Превышено максимальное количество попыток переподключения")
-                    bybit_websocket.is_running = False
-                    break
-
-
-async def historical_data_loader():
-    """Периодическая загрузка исторических данных"""
-    while True:
-        try:
-            # Проверяем доступность компонентов
-            if not db_queries:
-                logger.warning("⚠️ Загрузчик исторических данных: база данных недоступна")
-                await asyncio.sleep(300)  # Ждем 5 минут и проверяем снова
-                continue
+            with _reload_lock:
+                # Очищаем кэш
+                global _settings_cache
+                _settings_cache = {}
                 
-            if not bybit_api:
-                logger.warning("⚠️ Загрузчик исторических данных: Bybit API недоступен")
-                await asyncio.sleep(300)
-                continue
+                # Загружаем новые настройки
+                new_settings = load_settings()
                 
-            if db_queries and bybit_api:
-                # Получаем текущий watchlist
-                try:
-                    watchlist = await db_queries.get_watchlist()
-                except Exception as e:
-                    logger.error(f"❌ Ошибка получения watchlist: {e}")
-                    await asyncio.sleep(300)
-                    continue
-
-                for symbol in watchlist:
+                # Уведомляем все зарегистрированные компоненты
+                for callback in _settings_callbacks:
                     try:
-                        # Проверяем целостность данных
-                        analysis_hours = get_setting('ANALYSIS_HOURS', 1)
-                        offset_minutes = get_setting('OFFSET_MINUTES', 0)
-
-                        # Рассчитываем период загрузки
-                        total_hours = analysis_hours + (offset_minutes / 60)
-
-                        integrity = await db_queries.check_data_integrity(symbol, int(total_hours * 60))  # в минутах
-
-                        # Если целостность данных менее 90%, загружаем недостающие данные
-                        if integrity['integrity_percentage'] < 90:
-                            logger.info(
-                                f"📊 Загрузка исторических данных для {symbol} (целостность: {integrity['integrity_percentage']:.1f}%)")
-
-                            # Рассчитываем диапазон загрузки
-                            current_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-                            end_time_ms = current_time_ms - (offset_minutes * 60 * 1000)
-                            start_time_ms = end_time_ms - (int(total_hours * 60) * 60 * 1000)
-
-                            # Загружаем данные пакетами
-                            batch_size_hours = 24  # 24 часа за раз
-                            current_start = start_time_ms
-
-                            while current_start < end_time_ms:
-                                current_end = min(current_start + (batch_size_hours * 60 * 60 * 1000), end_time_ms)
-
-                                try:
-                                    klines = await bybit_api.get_kline_data(symbol, current_start, current_end)
-
-                                    for kline in klines:
-                                        # Сохраняем как закрытую свечу
-                                        kline_data = {
-                                            'start': kline['timestamp'],
-                                            'end': kline['timestamp'] + 60000,  # +1 минута
-                                            'open': kline['open'],
-                                            'high': kline['high'],
-                                            'low': kline['low'],
-                                            'close': kline['close'],
-                                            'volume': kline['volume']
-                                        }
-
-                                        await db_queries.save_historical_kline_data(symbol, kline_data)
-
-                                    logger.debug(f"📊 Загружено {len(klines)} свечей для {symbol}")
-
-                                except Exception as e:
-                                    logger.error(
-                                        f"❌ Ошибка загрузки данных для {symbol} в диапазоне {current_start}-{current_end}: {e}")
-
-                                current_start = current_end
-                                await asyncio.sleep(0.1)  # Небольшая задержка между запросами
-
-                        await asyncio.sleep(0.5)  # Задержка между символами
-
+                        # Проверяем, есть ли активный event loop
+                        try:
+                            loop = asyncio.get_running_loop()
+                            if loop and not loop.is_closed():
+                                # Если есть активный loop, планируем выполнение
+                                asyncio.run_coroutine_threadsafe(callback(new_settings), loop)
+                            else:
+                                # Если нет активного loop, пропускаем асинхронный callback
+                                print(f"⚠️ Пропущен callback - нет активного event loop")
+                        except RuntimeError:
+                            # Нет активного event loop - пропускаем асинхронные callbacks
+                            if not asyncio.iscoroutinefunction(callback):
+                                callback(new_settings)
+                            else:
+                                print(f"⚠️ Пропущен асинхронный callback - нет активного event loop")
+                                
                     except Exception as e:
-                        logger.error(f"❌ Ошибка обработки исторических данных для {symbol}: {e}")
-                        continue
-
-            # Проверяем каждые 30 минут
-            await asyncio.sleep(1800)
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузчика исторических данных: {e}")
-            await asyncio.sleep(300)  # Повторить через 5 минут при ошибке
-
-
-async def periodic_cleanup():
-    """Периодическая очистка старых данных"""
-    while True:
-        try:
-            await asyncio.sleep(3600)  # Каждый час
-            
-            if alert_manager:
-                await alert_manager.cleanup_old_data()
+                        print(f"❌ Ошибка обновления настроек в компоненте: {e}")
                 
-            if db_queries:
-                retention_hours = get_setting('DATA_RETENTION_HOURS', 2)
-                # Здесь можно добавить очистку старых данных через db_queries
-            else:
-                logger.debug("🧹 Очистка БД пропущена - база данных недоступна")
+                print(f"✅ Настройки перезагружены из .env файла")
                 
-            logger.info("🧹 Периодическая очистка данных выполнена")
         except Exception as e:
-            logger.error(f"❌ Ошибка периодической очистки: {e}")
+            print(f"❌ Ошибка перезагрузки настроек: {e}")
+    
+    # Запускаем в отдельном потоке
+    thread = threading.Thread(target=reload_thread, daemon=True)
+    thread.start()
 
 
-app = FastAPI(title="Trading Volume Analyzer", lifespan=lifespan)
+class SettingsFileHandler(FileSystemEventHandler):
+    """Обработчик изменений файла настроек"""
 
-# Добавляем CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+
+        if event.src_path == str(ENV_FILE_PATH):
+            # Используем безопасную перезагрузку в отдельном потоке
+            _safe_reload_in_thread()
 
 
-# WebSocket endpoint
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await connection_manager.connect(websocket)
+def create_env_file():
+    """Создание .env файла с настройками по умолчанию"""
+    if ENV_FILE_PATH.exists():
+        return
+
     try:
-        while True:
-            # Ожидаем сообщения от клиента
-            data = await websocket.receive_text()
-            await connection_manager.handle_client_message(websocket, data)
-    except WebSocketDisconnect:
-        connection_manager.disconnect(websocket)
+        # Создаем директорию если её нет
+        ENV_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(ENV_FILE_PATH, 'w', encoding='utf-8') as f:
+            f.write("# Настройки CryptoScan\n")
+            f.write("# Этот файл создан автоматически. Измените значения по необходимости.\n\n")
+
+            # Группируем настройки по категориям
+            categories = {
+                'Сервер': ['SERVER_HOST', 'SERVER_PORT'],
+                'База данных': ['DATABASE_URL', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'],
+                'Анализ объемов': ['ANALYSIS_HOURS', 'OFFSET_MINUTES', 'VOLUME_MULTIPLIER', 'MIN_VOLUME_USDT',
+                                   'CONSECUTIVE_LONG_COUNT', 'ALERT_GROUPING_MINUTES', 'DATA_RETENTION_HOURS',
+                                   'UPDATE_INTERVAL_SECONDS', 'PAIRS_CHECK_INTERVAL_MINUTES'],
+                'Фильтр цен': ['PRICE_CHECK_INTERVAL_MINUTES', 'PRICE_HISTORY_DAYS', 'PRICE_DROP_PERCENTAGE'],
+                'Watchlist': ['WATCHLIST_AUTO_UPDATE'],
+                'Telegram': ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID'],
+                'Bybit API': ['BYBIT_API_KEY', 'BYBIT_API_SECRET'],
+                'Логирование': ['LOG_LEVEL', 'LOG_FILE'],
+                'WebSocket': ['WS_PING_INTERVAL', 'WS_PING_TIMEOUT', 'WS_CLOSE_TIMEOUT', 'WS_MAX_SIZE'],
+                'Синхронизация времени': ['TIME_SYNC_INTERVAL', 'TIME_SERVER_SYNC_INTERVAL'],
+                'Имбаланс': ['MIN_GAP_PERCENTAGE', 'MIN_STRENGTH', 'FAIR_VALUE_GAP_ENABLED',
+                             'ORDER_BLOCK_ENABLED', 'BREAKER_BLOCK_ENABLED'],
+                'Стакан': ['ORDERBOOK_ENABLED', 'ORDERBOOK_SNAPSHOT_ON_ALERT'],
+                'Алерты': ['VOLUME_ALERTS_ENABLED', 'CONSECUTIVE_ALERTS_ENABLED', 'PRIORITY_ALERTS_ENABLED',
+                           'IMBALANCE_ENABLED', 'NOTIFICATION_ENABLED', 'VOLUME_TYPE'],
+                'Социальные сети': ['SOCIAL_SENTIMENT_ENABLED', 'SOCIAL_ANALYSIS_PERIOD_HOURS',
+                                    'SOCIAL_MIN_MENTIONS_FOR_RATING', 'SOCIAL_CACHE_DURATION_MINUTES']
+            }
+
+            for category, keys in categories.items():
+                f.write(f"# {category}\n")
+                for key in keys:
+                    if key in DEFAULT_SETTINGS:
+                        f.write(f"{key}={DEFAULT_SETTINGS[key]}\n")
+                f.write("\n")
+        
+        print(f"✅ Создан файл настроек: {ENV_FILE_PATH}")
+        
     except Exception as e:
-        logger.error(f"WebSocket ошибка: {e}")
-        connection_manager.disconnect(websocket)
+        print(f"❌ Ошибка создания файла настроек: {e}")
 
 
-# API endpoints
-@app.get("/api/stats")
-async def get_stats():
-    """Получить статистику системы"""
+def load_settings() -> Dict[str, Any]:
+    """Загрузка настроек из .env файла или создание файла с настройками по умолчанию"""
+    global _settings_cache, _last_modified
+
     try:
-        if not db_queries:
-            return {"error": "Database not initialized"}
-
-        # Получаем статистику из базы данных
-        watchlist = await db_queries.get_watchlist()
-        # alerts_data = await db_queries.get_all_alerts(limit=1000)  # Будет реализовано
-        # favorites = await db_queries.get_favorites()  # Будет реализовано
-        # trading_stats = await db_queries.get_trading_statistics()  # Будет реализовано
-
-        # Информация о синхронизации времени
-        time_sync_info = {}
-        if time_manager:
-            time_sync_info = time_manager.get_sync_status()
-
-        # Статистика подписок
-        subscription_stats = {}
-        if bybit_websocket:
-            subscription_stats = bybit_websocket.get_connection_stats()
-
-        return {
-            "pairs_count": len(watchlist),
-            "favorites_count": 0,  # Временно
-            "alerts_count": 0,  # Временно
-            "volume_alerts_count": 0,  # Временно
-            "consecutive_alerts_count": 0,  # Временно
-            "priority_alerts_count": 0,  # Временно
-            "trading_stats": {},  # Временно
-            "subscription_stats": subscription_stats,
-            "last_update": datetime.now(timezone.utc).isoformat(),
-            "system_status": "running",
-            "time_sync": time_sync_info
-        }
-    except Exception as e:
-        logger.error(f"Ошибка получения статистики: {e}")
-        return {"error": str(e)}
-
-
-@app.get("/api/time")
-async def get_time_info():
-    """Получить информацию о времени биржи"""
-    try:
-        if time_manager:
-            return time_manager.get_time_info()
+        # Проверяем, изменился ли файл
+        if ENV_FILE_PATH.exists():
+            current_modified = ENV_FILE_PATH.stat().st_mtime
+            if current_modified == _last_modified and _settings_cache:
+                return _settings_cache
+            _last_modified = current_modified
         else:
-            # Fallback на локальное UTC время
-            current_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-            return {
-                "is_synced": False,
-                "serverTime": current_time_ms,
-                "local_time": datetime.now(timezone.utc).isoformat(),
-                "utc_time": datetime.now(timezone.utc).isoformat(),
-                "time_offset_ms": 0,
-                "status": "not_synced"
-            }
+            # Создаем файл если его нет
+            create_env_file()
     except Exception as e:
-        logger.error(f"Ошибка получения информации о времени: {e}")
-        current_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        return {
-            "is_synced": False,
-            "serverTime": current_time_ms,
-            "local_time": datetime.now(timezone.utc).isoformat(),
-            "utc_time": datetime.now(timezone.utc).isoformat(),
-            "time_offset_ms": 0,
-            "status": "error",
-            "error": str(e)
-        }
+        print(f"❌ Ошибка проверки файла настроек: {e}")
 
+    # Загружаем настройки из .env файла
+    settings = {}
 
-@app.get("/api/watchlist")
-async def get_watchlist():
-    """Получить список торговых пар"""
     try:
-        if not db_queries:
-            return {
-                "error": "База данных недоступна",
-                "pairs": [],
-                "message": "Настройте подключение к базе данных в настройках"
-            }
-            
-        pairs = await db_queries.get_watchlist_details()
-        return {"pairs": pairs}
+        if ENV_FILE_PATH.exists():
+            with open(ENV_FILE_PATH, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        settings[key.strip()] = value.strip()
     except Exception as e:
-        logger.error(f"Ошибка получения watchlist: {e}")
-        return {
-            "error": str(e),
-            "pairs": [],
-            "message": "Ошибка получения данных из базы"
-        }
+        print(f"❌ Ошибка чтения .env файла: {e}")
+
+    # Дополняем недостающие настройки значениями по умолчанию
+    for key, default_value in DEFAULT_SETTINGS.items():
+        if key not in settings:
+            settings[key] = default_value
+
+    _settings_cache = settings
+    return settings
 
 
-@app.post("/api/watchlist")
-async def add_to_watchlist(item: WatchlistAdd):
-    """Добавить торговую пару в watchlist"""
+async def reload_settings():
+    """Асинхронная перезагрузка настроек"""
     try:
-        if not db_queries:
-            return {
-                "status": "error",
-                "message": "База данных недоступна. Настройте подключение в настройках."
-            }
-            
-        await db_queries.add_to_watchlist(item.symbol)
+        # Небольшая задержка для завершения записи файла
+        await asyncio.sleep(0.1)
 
-        # Добавляем пару в WebSocket менеджер
-        if bybit_websocket:
-            bybit_websocket.trading_pairs.add(item.symbol)
-            await bybit_websocket.subscribe_to_new_pairs({item.symbol})
+        with _reload_lock:
+            # Очищаем кэш
+            global _settings_cache
+            _settings_cache = {}
 
-        # Уведомляем клиентов об обновлении
-        await connection_manager.broadcast_json({
-            "type": "watchlist_updated",
-            "action": "added",
-            "symbol": item.symbol
-        })
-
-        return {"status": "success", "symbol": item.symbol}
-    except Exception as e:
-        logger.error(f"Ошибка добавления в watchlist: {e}")
-        return {
-            "status": "error",
-            "message": f"Ошибка добавления в watchlist: {str(e)}"
-        }
-
-
-@app.get("/api/chart-data/{symbol}")
-async def get_chart_data(symbol: str, interval: str = "1m", hours: int = 24):
-    """Получить данные для графика"""
-    try:
-        # Заглушка для данных графика
-        return {"chart_data": []}
-    except Exception as e:
-        logger.error(f"Ошибка получения данных графика: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/favorites")
-async def get_favorites():
-    """Получить список избранных пар"""
-    try:
-        # Заглушка для избранного
-        return {"favorites": []}
-    except Exception as e:
-        logger.error(f"Ошибка получения избранного: {e}")
-        return {"status": "error", "message": str(e)}
-
-
-@app.post("/api/favorites")
-async def add_to_favorites(item: FavoriteAdd):
-    """Добавить пару в избранное"""
-    try:
-        # Заглушка для добавления в избранное
-        return {"status": "success", "symbol": item.symbol}
-    except Exception as e:
-        logger.error(f"Ошибка добавления в избранное: {e}")
-        return {"status": "error", "message": str(e)}
-
-
-@app.delete("/api/favorites/{symbol}")
-async def remove_from_favorites(symbol: str):
-    """Удалить пару из избранного"""
-    try:
-        # Заглушка для удаления из избранного
-        return {"status": "success", "symbol": symbol}
-    except Exception as e:
-        logger.error(f"Ошибка удаления из избранного: {e}")
-        return {"status": "error", "message": str(e)}
-
-
-@app.get("/api/alerts/all")
-async def get_all_alerts():
-    """Получить все алерты"""
-    try:
-        # Заглушка для алертов
-        return {
-            "volume_alerts": [],
-            "consecutive_alerts": [],
-            "priority_alerts": []
-        }
-    except Exception as e:
-        logger.error(f"Ошибка получения алертов: {e}")
-        return {"status": "error", "message": str(e)}
-
-
-@app.get("/api/alerts/symbol/{symbol}")
-async def get_symbol_alerts(symbol: str, hours: int = 24):
-    """Получить алерты для конкретного символа"""
-    try:
-        # Заглушка для алертов по символу
-        return {"alerts": []}
-    except Exception as e:
-        logger.error(f"Ошибка получения алертов для {symbol}: {e}")
-        return {"status": "error", "message": str(e)}
-
-
-@app.get("/api/settings")
-async def get_settings():
-    """Получить текущие настройки системы"""
-    try:
-        # Получаем настройки, сгруппированные по категориям
-        settings_by_category = get_settings_by_category()
-
-        # Информация о синхронизации времени
-        time_sync_info = {}
-        if time_manager:
-            time_sync_info = time_manager.get_sync_status()
-
-        # Информация о состоянии системы
-        system_status = {
-            "database_available": db_queries is not None,
-            "database_connection": db_connection is not None,
-            "alert_manager_active": alert_manager is not None,
-            "websocket_active": bybit_websocket is not None and bybit_websocket.is_running,
-            "price_filter_active": price_filter is not None,
-            "telegram_bot_enabled": telegram_bot is not None and telegram_bot.enabled
-        }
-
-        return {
-            "categories": settings_by_category,
-            "time_sync": time_sync_info,
-            "system_status": system_status,
-            "system_info": {
-                "config_file": str(ENV_FILE_PATH) if ENV_FILE_PATH.exists() else "Файл не создан",
-                "config_exists": ENV_FILE_PATH.exists(),
-                "last_modified": datetime.fromtimestamp(ENV_FILE_PATH.stat().st_mtime).isoformat() if ENV_FILE_PATH.exists() else None
-            }
-        }
-
-    except Exception as e:
-        logger.error(f"Ошибка получения настроек: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/paper-trades")
-async def create_paper_trade(trade: PaperTradeCreate):
-    """Создание бумажной сделки"""
-    try:
-        if not db_queries:
-            return {
-                "status": "error", 
-                "message": "База данных недоступна. Настройте подключение в настройках."
-            }
-
-        # Сохраняем бумажную сделку в базу данных
-        trade_id = await db_queries.save_paper_trade(trade.dict())
-
-        return {
-            "status": "success",
-            "trade_id": trade_id,
-            "message": "Бумажная сделка создана"
-        }
-    except Exception as e:
-        logger.error(f"Ошибка создания бумажной сделки: {e}")
-        return {"status": "error", "message": str(e)}
-
-
-@app.post("/api/trading/execute-trade")
-async def execute_real_trade(trade: RealTradeCreate):
-    """Выполнение реальной сделки"""
-    try:
-        # Проверяем настройки API
-        api_key = get_setting('BYBIT_API_KEY', '')
-        api_secret = get_setting('BYBIT_API_SECRET', '')
-
-        if not api_key or not api_secret:
-            raise HTTPException(status_code=400, detail="API ключи не настроены")
-
-        # Здесь должна быть логика выполнения реальной сделки через Bybit API
-        # Пока возвращаем заглушку
-        return {
-            "status": "success",
-            "order_id": "mock_order_123",
-            "message": "Сделка выполнена (demo режим)"
-        }
-    except Exception as e:
-        logger.error(f"Ошибка выполнения реальной сделки: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/trading/test-connection")
-async def test_trading_connection(credentials: dict):
-    """Тестирование подключения к торговому API"""
-    try:
-        api_key = credentials.get('api_key')
-        api_secret = credentials.get('api_secret')
-
-        if not api_key or not api_secret:
-            raise HTTPException(status_code=400, detail="API ключи не предоставлены")
-
-        # Здесь должна быть проверка подключения к Bybit API
-        # Пока возвращаем заглушку
-        return {
-            "success": True,
-            "balance": 10000.0,
-            "message": "Подключение успешно (demo режим)"
-        }
-    except Exception as e:
-        logger.error(f"Ошибка тестирования подключения: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/settings/schema")
-async def get_settings_schema_endpoint():
-    """Получить схему настроек с описаниями и типами"""
-    try:
-        schema = get_settings_schema()
-        return {"schema": schema}
-    except Exception as e:
-        logger.error(f"Ошибка получения схемы настроек: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/settings")
-async def update_settings(settings_update: SettingsUpdate):
-    """Обновить настройки анализатора"""
-    try:
-        settings = settings_update.settings
-        
-        # Преобразуем вложенные настройки в плоский формат
-        flat_settings = {}
-        for key, value in settings.items():
-            # Если это прямой ключ настройки (уже в правильном формате)
-            flat_settings[key] = value
-        
-        # Обновляем все настройки одним вызовом
-        success, errors = update_multiple_settings(flat_settings)
-        
-        if not success:
-            return {
-                "status": "error", 
-                "message": "Ошибка сохранения настроек", 
-                "errors": errors
-            }
-
-        # Обновляем настройки во всех компонентах системы
-        await update_all_components_settings(flat_settings)
-
-        # Уведомляем клиентов об успешном обновлении
-        await connection_manager.broadcast_json({
-            "type": "settings_updated",
-            "status": "success",
-            "data": settings,
-            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
-            "message": "Настройки успешно обновлены и сохранены",
-            "system_restart_required": False  # Настройки применяются автоматически
-        })
-        
-        logger.info("✅ Настройки успешно обновлены через API")
-        return {
-            "status": "success", 
-            "updated_count": len(flat_settings),
-            "message": "Настройки успешно обновлены и сохранены",
-            "applied_immediately": True
-        }
-        
-    except Exception as e:
-        logger.error(f"Ошибка обновления настроек: {e}")
-        
-        # Уведомляем клиентов об ошибке
-        if connection_manager:
-            await connection_manager.broadcast_json({
-                "type": "settings_update_error",
-                "error": str(e),
-                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
-            })
-        
-        return {
-            "status": "error", 
-            "message": f"Ошибка обновления настроек: {str(e)}", 
-            "detail": str(e)
-        }
-
-
-@app.post("/api/settings/reset")
-async def reset_settings(reset_data: SettingsReset):
-    """Сброс настроек к значениям по умолчанию"""
-    try:
-        if not reset_data.confirm:
-            return {
-                "status": "error",
-                "message": "Требуется подтверждение для сброса настроек"
-            }
-        
-        success = reset_settings_to_default()
-        
-        if success:
-            # Обновляем настройки во всех компонентах
-            from settings import load_settings
+            # Загружаем новые настройки
             new_settings = load_settings()
-            await update_all_components_settings(new_settings)
-            
-            if connection_manager:
-                await connection_manager.broadcast_json({
-                    "type": "settings_reset",
-                    "status": "success",
-                    "message": "Настройки сброшены к значениям по умолчанию",
-                    "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
-                })
-            
-            return {
-                "status": "success",
-                "message": "Настройки успешно сброшены к значениям по умолчанию"
-            }
-        else:
-            return {
-                "status": "error",
-                "message": "Ошибка сброса настроек"
-            }
-            
+
+            # Уведомляем все зарегистрированные компоненты
+            for callback in _settings_callbacks:
+                try:
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback(new_settings)
+                    else:
+                        callback(new_settings)
+                except Exception as e:
+                    print(f"❌ Ошибка обновления настроек в компоненте: {e}")
+
+            print(f"✅ Настройки перезагружены из .env файла")
+
     except Exception as e:
-        logger.error(f"Ошибка сброса настроек: {e}")
-        return {
-            "status": "error",
-            "message": f"Ошибка сброса настроек: {str(e)}"
+        print(f"❌ Ошибка перезагрузки настроек: {e}")
+
+
+def register_settings_callback(callback: Callable):
+    """Регистрация callback для уведомления об изменении настроек"""
+    _settings_callbacks.append(callback)
+
+
+def unregister_settings_callback(callback: Callable):
+    """Отмена регистрации callback"""
+    if callback in _settings_callbacks:
+        _settings_callbacks.remove(callback)
+
+
+def start_settings_monitor():
+    """Запуск мониторинга изменений файла настроек"""
+    global _file_observer
+
+    if not WATCHDOG_AVAILABLE:
+        print("⚠️ Мониторинг настроек недоступен - watchdog не установлен")
+        return
+
+    try:
+        if _file_observer is None:
+            event_handler = SettingsFileHandler()
+            _file_observer = Observer()
+            _file_observer.schedule(event_handler, str(BASE_DIR), recursive=False)
+            _file_observer.start()
+            print("🔍 Мониторинг изменений .env файла запущен")
+    except Exception as e:
+        print(f"❌ Ошибка запуска мониторинга настроек: {e}")
+
+
+def stop_settings_monitor():
+    """Остановка мониторинга изменений файла настроек"""
+    global _file_observer
+
+    if not WATCHDOG_AVAILABLE:
+        return
+
+    if _file_observer:
+        try:
+            _file_observer.stop()
+            _file_observer.join(timeout=5.0)  # Добавляем timeout
+            _file_observer = None
+            print("🛑 Мониторинг изменений .env файла остановлен")
+        except Exception as e:
+            print(f"❌ Ошибка остановки мониторинга настроек: {e}")
+
+
+def get_setting(key: str, default: Any = None) -> Any:
+    """Получение значения настройки"""
+    settings = load_settings()
+    value = settings.get(key, default)
+
+    # Преобразование строковых значений в нужные типы
+    if isinstance(value, str):
+        if value.lower() in ('true', 'false'):
+            return value.lower() == 'true'
+        try:
+            if '.' in value:
+                return float(value)
+            return int(value)
+        except ValueError:
+            return value
+
+    return value
+
+
+def update_setting(key: str, value: Any):
+    """Обновление настройки в .env файле"""
+    global _settings_cache, _last_modified
+
+    try:
+        # Преобразуем значение в строку, обрабатывая булевы значения
+        if isinstance(value, bool):
+            str_value = 'True' if value else 'False'
+        else:
+            str_value = str(value)
+
+        settings = load_settings()
+        settings[key] = str_value
+
+        # Обновляем кэш
+        _settings_cache[key] = str_value
+
+        # Перезаписываем .env файл
+        with open(ENV_FILE_PATH, 'w', encoding='utf-8') as f:
+            f.write("# Настройки CryptoScan\n")
+            f.write(f"# Обновлено автоматически: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+            for setting_key, setting_value in settings.items():
+                if not setting_key.startswith('#'):
+                    f.write(f"{setting_key}={setting_value}\n")
+
+        print(f"⚙️ Настройка {key} обновлена на {str_value}")
+
+        # Принудительно очищаем кэш для следующего чтения
+        _last_modified = 0
+        _settings_cache = {}
+
+    except Exception as e:
+        print(f"❌ Ошибка обновления настройки {key}: {e}")
+
+
+def update_multiple_settings(settings_dict: Dict[str, Any]) -> tuple[bool, List[str]]:
+    """Обновление нескольких настроек одновременно"""
+    errors = []
+    
+    try:
+        current_settings = load_settings()
+        
+        # Обновляем настройки
+        for key, value in settings_dict.items():
+            try:
+                if isinstance(value, bool):
+                    str_value = 'True' if value else 'False'
+                else:
+                    str_value = str(value)
+                current_settings[key] = str_value
+            except Exception as e:
+                errors.append(f"Ошибка обновления {key}: {e}")
+        
+        # Сохраняем все настройки в файл
+        with open(ENV_FILE_PATH, 'w', encoding='utf-8') as f:
+            f.write("# Настройки CryptoScan\n")
+            f.write(f"# Обновлено автоматически: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+            for key, value in current_settings.items():
+                if not key.startswith('#'):
+                    f.write(f"{key}={value}\n")
+        
+        # Очищаем кэш
+        global _settings_cache, _last_modified
+        _settings_cache = {}
+        _last_modified = 0
+        
+        print(f"⚙️ Обновлено {len(settings_dict)} настроек")
+        return len(errors) == 0, errors
+        
+    except Exception as e:
+        errors.append(f"Общая ошибка сохранения: {e}")
+        return False, errors
+
+
+def get_settings_schema() -> Dict:
+    """Получить схему настроек с описаниями и типами"""
+    return SETTINGS_SCHEMA
+
+
+def get_settings_by_category() -> Dict:
+    """Получить настройки, сгруппированные по категориям"""
+    current_settings = load_settings()
+    categorized = {}
+    
+    for category_key, category_info in SETTINGS_SCHEMA.items():
+        categorized[category_key] = {
+            'title': category_info['title'],
+            'description': category_info['description'],
+            'settings': {}
         }
+        
+        for setting_key, setting_info in category_info['settings'].items():
+            current_value = current_settings.get(setting_key, setting_info['default'])
+            
+            # Преобразуем значение в правильный тип
+            if setting_info['type'] == 'boolean':
+                if isinstance(current_value, str):
+                    current_value = current_value.lower() == 'true'
+            elif setting_info['type'] == 'integer':
+                try:
+                    current_value = int(current_value)
+                except (ValueError, TypeError):
+                    current_value = setting_info['default']
+            elif setting_info['type'] == 'float':
+                try:
+                    current_value = float(current_value)
+                except (ValueError, TypeError):
+                    current_value = setting_info['default']
+            
+            categorized[category_key]['settings'][setting_key] = {
+                **setting_info,
+                'current_value': current_value
+            }
+    
+    return categorized
 
 
-@app.get("/api/settings/export")
-async def export_settings_endpoint():
+def reset_settings_to_default() -> bool:
+    """Сброс всех настроек к значениям по умолчанию"""
+    try:
+        with open(ENV_FILE_PATH, 'w', encoding='utf-8') as f:
+            f.write("# Настройки CryptoScan\n")
+            f.write(f"# Сброшено к значениям по умолчанию: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+            for key, value in DEFAULT_SETTINGS.items():
+                f.write(f"{key}={value}\n")
+        
+        # Очищаем кэш
+        global _settings_cache, _last_modified
+        _settings_cache = {}
+        _last_modified = 0
+        
+        print("✅ Настройки сброшены к значениям по умолчанию")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Ошибка сброса настроек: {e}")
+        return False
+
+
+def export_settings() -> Dict[str, Any]:
     """Экспорт текущих настроек"""
-    try:
-        settings = export_settings()
-        return {
-            "status": "success",
-            "settings": settings,
-            "exported_at": datetime.now(timezone.utc).isoformat(),
-            "count": len(settings)
-        }
-    except Exception as e:
-        logger.error(f"Ошибка экспорта настроек: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return load_settings()
 
 
-@app.post("/api/settings/import")
-async def import_settings_endpoint(import_data: SettingsImport):
-    """Импорт настроек"""
-    try:
-        success, errors = import_settings(import_data.settings)
-        
-        if success:
-            # Обновляем настройки во всех компонентах
-            await update_all_components_settings(import_data.settings)
-            
-            if connection_manager:
-                await connection_manager.broadcast_json({
-                    "type": "settings_imported",
-                    "status": "success",
-                    "count": len(import_data.settings),
-                    "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
-                })
-            
-            return {
-                "status": "success",
-                "imported_count": len(import_data.settings),
-                "message": "Настройки успешно импортированы"
-            }
-        else:
-            return {
-                "status": "error",
-                "message": "Ошибка импорта настроек",
-                "errors": errors
-            }
-            
-    except Exception as e:
-        logger.error(f"Ошибка импорта настроек: {e}")
-        return {
-            "status": "error",
-            "message": f"Ошибка импорта настроек: {str(e)}"
-        }
+def import_settings(settings_dict: Dict[str, Any]) -> tuple[bool, List[str]]:
+    """Импорт настроек из словаря"""
+    return update_multiple_settings(settings_dict)
 
 
-@app.post("/api/settings/reload")
-async def reload_settings_endpoint():
-    """Принудительная перезагрузка настроек из .env файла"""
-    try:
-        from settings import reload_settings, load_settings
-        await reload_settings()
-        
-        # Обновляем настройки во всех компонентах
-        new_settings = load_settings()
-        await update_all_components_settings(new_settings)
-
-        return {"status": "success", "message": "Настройки перезагружены из .env файла"}
-    except Exception as e:
-        logger.error(f"Ошибка перезагрузки настроек: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/api/watchlist/{symbol}")
-async def remove_from_watchlist(symbol: str):
-    """Удалить торговую пару из watchlist"""
-    try:
-        if not db_queries:
-            return {
-                "status": "error",
-                "message": "База данных недоступна. Настройте подключение в настройках."
-            }
-            
-        await db_queries.remove_from_watchlist(symbol)
-
-        # Удаляем пару из WebSocket менеджера
-        if bybit_websocket:
-            bybit_websocket.trading_pairs.discard(symbol)
-            await bybit_websocket.unsubscribe_from_pairs({symbol})
-
-        # Уведомляем клиентов об обновлении
-        await connection_manager.broadcast_json({
-            "type": "watchlist_updated",
-            "action": "removed",
-            "symbol": symbol
-        })
-
-        return {"status": "success", "symbol": symbol}
-    except Exception as e:
-        logger.error(f"Ошибка удаления из watchlist: {e}")
-        return {
-            "status": "error",
-            "message": f"Ошибка удаления из watchlist: {str(e)}"
-        }
-
-
-# Проверяем существование директории dist перед монтированием
-if os.path.exists("dist"):
-    if os.path.exists("dist/assets"):
-        app.mount("/assets", StaticFiles(directory="dist/assets"), name="assets")
-
-
-    @app.get("/vite.svg")
-    async def get_vite_svg():
-        if os.path.exists("dist/vite.svg"):
-            return FileResponse("dist/vite.svg")
-        raise HTTPException(status_code=404, detail="File not found")
-
-
-    @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
-        """Обслуживание SPA для всех маршрутов"""
-        if os.path.exists("dist/index.html"):
-            return FileResponse("dist/index.html")
-        raise HTTPException(status_code=404, detail="SPA not built")
-else:
-    @app.get("/")
-    async def root():
-        return {"message": "Frontend not built. Run 'npm run build' first."}
-
-if __name__ == "__main__":
-    # Настройки сервера из переменных окружения
-    host = get_setting('SERVER_HOST', '0.0.0.0')
-    port = get_setting('SERVER_PORT', 8000)
-
-    uvicorn.run(
-        "main:app",
-        host=host,
-        port=port,
-        reload=False,
-        log_level="info"
-    )
+# Инициализация настроек при импорте модуля
+try:
+    create_env_file()
+    SETTINGS = load_settings()
+except Exception as e:
+    print(f"❌ Ошибка инициализации настроек: {e}")
+    SETTINGS = DEFAULT_SETTINGS.copy()
