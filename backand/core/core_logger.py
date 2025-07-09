@@ -2,7 +2,19 @@ import logging
 import sys
 from pathlib import Path
 from typing import Optional
-from cryptoscan.backand.settings import get_setting
+
+# Импортируем get_setting с обработкой циклического импорта
+def get_log_setting(key: str, default):
+    try:
+        from cryptoscan.backand.settings import get_setting
+        return get_setting(key, default)
+    except ImportError:
+        # Fallback значения при циклическом импорте
+        fallback_values = {
+            'LOG_LEVEL': 'INFO',
+            'LOG_FILE': 'cryptoscan.log'
+        }
+        return fallback_values.get(key, default)
 
 
 class CoreLogger:
@@ -23,8 +35,8 @@ class CoreLogger:
     
     def _setup_logging(self):
         """Настройка системы логирования"""
-        log_level = get_setting('LOG_LEVEL', 'INFO')
-        log_file = get_setting('LOG_FILE', 'cryptoscan.log')
+        log_level = get_log_setting('LOG_LEVEL', 'INFO')
+        log_file = get_log_setting('LOG_FILE', 'cryptoscan.log')
         
         # Создаем директорию для логов если её нет
         log_path = Path(log_file)
@@ -65,8 +77,11 @@ class CoreLogger:
         root_logger.setLevel(getattr(logging, level.upper()))
         
         # Обновляем настройку
-        from settings import update_setting
-        update_setting('LOG_LEVEL', level)
+        try:
+            from settings import update_setting
+            update_setting('LOG_LEVEL', level)
+        except ImportError:
+            pass  # Игнорируем при циклическом импорте
 
 
 # Глобальный экземпляр логгера

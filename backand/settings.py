@@ -1,14 +1,14 @@
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 import asyncio
 import time
 from datetime import datetime
+import logging
 
 try:
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
-
     WATCHDOG_AVAILABLE = True
 except ImportError:
     WATCHDOG_AVAILABLE = False
@@ -27,83 +27,392 @@ _last_modified = 0
 _settings_callbacks = []
 _file_observer = None
 
-# Настройки по умолчанию
+# Настройки по умолчанию с описаниями и категориями
 DEFAULT_SETTINGS = {
     # Настройки сервера
-    'SERVER_HOST': '0.0.0.0',
-    'SERVER_PORT': '8000',
+    'SERVER_HOST': {
+        'value': '0.0.0.0',
+        'type': 'string',
+        'category': 'Сервер',
+        'description': 'IP адрес для привязки сервера'
+    },
+    'SERVER_PORT': {
+        'value': '8000',
+        'type': 'integer',
+        'category': 'Сервер',
+        'description': 'Порт для HTTP сервера'
+    },
 
     # Настройки базы данных
-    'DATABASE_URL': 'postgresql://user:password@localhost:5432/cryptoscan',
-    'DB_HOST': 'localhost',
-    'DB_PORT': '5432',
-    'DB_NAME': 'cryptoscan',
-    'DB_USER': 'user',
-    'DB_PASSWORD': 'password',
+    'DATABASE_URL': {
+        'value': 'postgresql://user:password@localhost:5432/cryptoscan',
+        'type': 'string',
+        'category': 'База данных',
+        'description': 'URL подключения к PostgreSQL'
+    },
+    'DB_HOST': {
+        'value': 'localhost',
+        'type': 'string',
+        'category': 'База данных',
+        'description': 'Хост базы данных'
+    },
+    'DB_PORT': {
+        'value': '5432',
+        'type': 'integer',
+        'category': 'База данных',
+        'description': 'Порт базы данных'
+    },
+    'DB_NAME': {
+        'value': 'cryptoscan',
+        'type': 'string',
+        'category': 'База данных',
+        'description': 'Имя базы данных'
+    },
+    'DB_USER': {
+        'value': 'user',
+        'type': 'string',
+        'category': 'База данных',
+        'description': 'Пользователь базы данных'
+    },
+    'DB_PASSWORD': {
+        'value': 'password',
+        'type': 'string',
+        'category': 'База данных',
+        'description': 'Пароль базы данных'
+    },
 
     # Настройки анализа объемов
-    'ANALYSIS_HOURS': '1',
-    'OFFSET_MINUTES': '0',
-    'VOLUME_MULTIPLIER': '2.0',
-    'MIN_VOLUME_USDT': '1000',
-    'CONSECUTIVE_LONG_COUNT': '5',
-    'ALERT_GROUPING_MINUTES': '5',
-    'DATA_RETENTION_HOURS': '2',
-    'UPDATE_INTERVAL_SECONDS': '1',
-    'PAIRS_CHECK_INTERVAL_MINUTES': '30',
-    'PRICE_CHECK_INTERVAL_MINUTES': '5',
+    'ANALYSIS_HOURS': {
+        'value': '1',
+        'type': 'integer',
+        'category': 'Анализ объемов',
+        'description': 'Количество часов для анализа исторических данных'
+    },
+    'OFFSET_MINUTES': {
+        'value': '0',
+        'type': 'integer',
+        'category': 'Анализ объемов',
+        'description': 'Смещение в минутах от текущего времени'
+    },
+    'VOLUME_MULTIPLIER': {
+        'value': '2.0',
+        'type': 'float',
+        'category': 'Анализ объемов',
+        'description': 'Множитель превышения объема для алерта'
+    },
+    'MIN_VOLUME_USDT': {
+        'value': '1000',
+        'type': 'integer',
+        'category': 'Анализ объемов',
+        'description': 'Минимальный объем в USDT для алерта'
+    },
+    'CONSECUTIVE_LONG_COUNT': {
+        'value': '5',
+        'type': 'integer',
+        'category': 'Анализ объемов',
+        'description': 'Количество подряд идущих LONG свечей для алерта'
+    },
+    'ALERT_GROUPING_MINUTES': {
+        'value': '5',
+        'type': 'integer',
+        'category': 'Анализ объемов',
+        'description': 'Интервал группировки алертов в минутах'
+    },
+    'DATA_RETENTION_HOURS': {
+        'value': '2',
+        'type': 'integer',
+        'category': 'Анализ объемов',
+        'description': 'Время хранения данных в часах'
+    },
+    'UPDATE_INTERVAL_SECONDS': {
+        'value': '1',
+        'type': 'integer',
+        'category': 'Анализ объемов',
+        'description': 'Интервал обновления данных в секундах'
+    },
+    'PAIRS_CHECK_INTERVAL_MINUTES': {
+        'value': '30',
+        'type': 'integer',
+        'category': 'Анализ объемов',
+        'description': 'Интервал проверки торговых пар в минутах'
+    },
 
     # Настройки фильтра цен
-    'PRICE_HISTORY_DAYS': '30',
-    'PRICE_DROP_PERCENTAGE': '10.0',
-    'WATCHLIST_AUTO_UPDATE': 'True',
+    'PRICE_HISTORY_DAYS': {
+        'value': '30',
+        'type': 'integer',
+        'category': 'Фильтр цен',
+        'description': 'Количество дней для анализа исторических цен'
+    },
+    'PRICE_DROP_PERCENTAGE': {
+        'value': '10.0',
+        'type': 'float',
+        'category': 'Фильтр цен',
+        'description': 'Процент падения цены для добавления в watchlist'
+    },
+    'WATCHLIST_AUTO_UPDATE': {
+        'value': 'True',
+        'type': 'boolean',
+        'category': 'Фильтр цен',
+        'description': 'Автоматическое обновление watchlist'
+    },
 
     # Настройки Telegram
-    'TELEGRAM_BOT_TOKEN': '',
-    'TELEGRAM_CHAT_ID': '',
+    'TELEGRAM_BOT_TOKEN': {
+        'value': '',
+        'type': 'string',
+        'category': 'Telegram',
+        'description': 'Токен Telegram бота для уведомлений'
+    },
+    'TELEGRAM_CHAT_ID': {
+        'value': '',
+        'type': 'string',
+        'category': 'Telegram',
+        'description': 'ID чата для отправки уведомлений'
+    },
 
     # Настройки Bybit API
-    'BYBIT_API_KEY': '',
-    'BYBIT_API_SECRET': '',
+    'BYBIT_API_KEY': {
+        'value': '',
+        'type': 'string',
+        'category': 'Bybit API',
+        'description': 'API ключ для торговли на Bybit'
+    },
+    'BYBIT_API_SECRET': {
+        'value': '',
+        'type': 'string',
+        'category': 'Bybit API',
+        'description': 'Секретный ключ для торговли на Bybit'
+    },
 
     # Настройки логирования
-    'LOG_LEVEL': 'INFO',
-    'LOG_FILE': 'cryptoscan.log',
+    'LOG_LEVEL': {
+        'value': 'INFO',
+        'type': 'select',
+        'category': 'Логирование',
+        'description': 'Уровень логирования',
+        'options': ['DEBUG', 'INFO', 'WARNING', 'ERROR']
+    },
+    'LOG_FILE': {
+        'value': 'cryptoscan.log',
+        'type': 'string',
+        'category': 'Логирование',
+        'description': 'Файл для записи логов'
+    },
 
     # Настройки WebSocket
-    'WS_PING_INTERVAL': '20',
-    'WS_PING_TIMEOUT': '10',
-    'WS_CLOSE_TIMEOUT': '10',
-    'WS_MAX_SIZE': '10000000',
+    'WS_PING_INTERVAL': {
+        'value': '20',
+        'type': 'integer',
+        'category': 'WebSocket',
+        'description': 'Интервал ping в секундах'
+    },
+    'WS_PING_TIMEOUT': {
+        'value': '10',
+        'type': 'integer',
+        'category': 'WebSocket',
+        'description': 'Таймаут ping в секундах'
+    },
+    'WS_CLOSE_TIMEOUT': {
+        'value': '10',
+        'type': 'integer',
+        'category': 'WebSocket',
+        'description': 'Таймаут закрытия соединения в секундах'
+    },
+    'WS_MAX_SIZE': {
+        'value': '10000000',
+        'type': 'integer',
+        'category': 'WebSocket',
+        'description': 'Максимальный размер сообщения в байтах'
+    },
 
     # Настройки синхронизации времени
-    'TIME_SYNC_INTERVAL': '300',
-    'TIME_SERVER_SYNC_INTERVAL': '3600',
+    'TIME_SYNC_INTERVAL': {
+        'value': '300',
+        'type': 'integer',
+        'category': 'Синхронизация времени',
+        'description': 'Интервал синхронизации с биржей в секундах'
+    },
+    'TIME_SERVER_SYNC_INTERVAL': {
+        'value': '3600',
+        'type': 'integer',
+        'category': 'Синхронизация времени',
+        'description': 'Интервал синхронизации с серверами времени в секундах'
+    },
 
     # Настройки имбаланса
-    'MIN_GAP_PERCENTAGE': '0.1',
-    'MIN_STRENGTH': '0.5',
-    'FAIR_VALUE_GAP_ENABLED': 'True',
-    'ORDER_BLOCK_ENABLED': 'True',
-    'BREAKER_BLOCK_ENABLED': 'True',
+    'MIN_GAP_PERCENTAGE': {
+        'value': '0.1',
+        'type': 'float',
+        'category': 'Имбаланс',
+        'description': 'Минимальный процент гэпа для анализа'
+    },
+    'MIN_STRENGTH': {
+        'value': '0.5',
+        'type': 'float',
+        'category': 'Имбаланс',
+        'description': 'Минимальная сила сигнала имбаланса'
+    },
+    'FAIR_VALUE_GAP_ENABLED': {
+        'value': 'True',
+        'type': 'boolean',
+        'category': 'Имбаланс',
+        'description': 'Включить анализ Fair Value Gap'
+    },
+    'ORDER_BLOCK_ENABLED': {
+        'value': 'True',
+        'type': 'boolean',
+        'category': 'Имбаланс',
+        'description': 'Включить анализ Order Block'
+    },
+    'BREAKER_BLOCK_ENABLED': {
+        'value': 'True',
+        'type': 'boolean',
+        'category': 'Имбаланс',
+        'description': 'Включить анализ Breaker Block'
+    },
 
     # Настройки стакана
-    'ORDERBOOK_ENABLED': 'False',
-    'ORDERBOOK_SNAPSHOT_ON_ALERT': 'False',
+    'ORDERBOOK_ENABLED': {
+        'value': 'False',
+        'type': 'boolean',
+        'category': 'Стакан',
+        'description': 'Включить получение данных стакана'
+    },
+    'ORDERBOOK_SNAPSHOT_ON_ALERT': {
+        'value': 'False',
+        'type': 'boolean',
+        'category': 'Стакан',
+        'description': 'Делать снимок стакана при алерте'
+    },
 
     # Настройки алертов
-    'VOLUME_ALERTS_ENABLED': 'True',
-    'CONSECUTIVE_ALERTS_ENABLED': 'True',
-    'PRIORITY_ALERTS_ENABLED': 'True',
-    'IMBALANCE_ENABLED': 'True',
-    'NOTIFICATION_ENABLED': 'True',
-    'VOLUME_TYPE': 'long',
+    'VOLUME_ALERTS_ENABLED': {
+        'value': 'True',
+        'type': 'boolean',
+        'category': 'Алерты',
+        'description': 'Включить алерты по объему'
+    },
+    'CONSECUTIVE_ALERTS_ENABLED': {
+        'value': 'True',
+        'type': 'boolean',
+        'category': 'Алерты',
+        'description': 'Включить алерты по подряд идущим свечам'
+    },
+    'PRIORITY_ALERTS_ENABLED': {
+        'value': 'True',
+        'type': 'boolean',
+        'category': 'Алерты',
+        'description': 'Включить приоритетные алерты'
+    },
+    'IMBALANCE_ENABLED': {
+        'value': 'True',
+        'type': 'boolean',
+        'category': 'Алерты',
+        'description': 'Включить анализ имбалансов в алертах'
+    },
+    'NOTIFICATION_ENABLED': {
+        'value': 'True',
+        'type': 'boolean',
+        'category': 'Алерты',
+        'description': 'Включить уведомления'
+    },
+    'VOLUME_TYPE': {
+        'value': 'long',
+        'type': 'select',
+        'category': 'Алерты',
+        'description': 'Тип объема для анализа',
+        'options': ['long', 'short', 'all']
+    },
+
+    # Настройки торговли
+    'ACCOUNT_BALANCE': {
+        'value': '10000',
+        'type': 'float',
+        'category': 'Торговля',
+        'description': 'Баланс аккаунта для расчетов'
+    },
+    'MAX_RISK_PER_TRADE': {
+        'value': '2.0',
+        'type': 'float',
+        'category': 'Торговля',
+        'description': 'Максимальный риск на сделку в процентах'
+    },
+    'MAX_OPEN_TRADES': {
+        'value': '5',
+        'type': 'integer',
+        'category': 'Торговля',
+        'description': 'Максимальное количество открытых сделок'
+    },
+    'DEFAULT_STOP_LOSS_PERCENTAGE': {
+        'value': '2.0',
+        'type': 'float',
+        'category': 'Торговля',
+        'description': 'Стоп-лосс по умолчанию в процентах'
+    },
+    'DEFAULT_TAKE_PROFIT_PERCENTAGE': {
+        'value': '6.0',
+        'type': 'float',
+        'category': 'Торговля',
+        'description': 'Тейк-профит по умолчанию в процентах'
+    },
+    'AUTO_CALCULATE_QUANTITY': {
+        'value': 'True',
+        'type': 'boolean',
+        'category': 'Торговля',
+        'description': 'Автоматический расчет размера позиции'
+    },
+    'ENABLE_REAL_TRADING': {
+        'value': 'False',
+        'type': 'boolean',
+        'category': 'Торговля',
+        'description': 'Включить реальную торговлю'
+    },
+    'DEFAULT_LEVERAGE': {
+        'value': '1',
+        'type': 'integer',
+        'category': 'Торговля',
+        'description': 'Кредитное плечо по умолчанию'
+    },
+    'DEFAULT_MARGIN_TYPE': {
+        'value': 'isolated',
+        'type': 'select',
+        'category': 'Торговля',
+        'description': 'Тип маржи по умолчанию',
+        'options': ['isolated', 'cross']
+    },
+    'CONFIRM_TRADES': {
+        'value': 'True',
+        'type': 'boolean',
+        'category': 'Торговля',
+        'description': 'Подтверждение перед выполнением сделок'
+    },
 
     # Настройки социальных сетей
-    'SOCIAL_SENTIMENT_ENABLED': 'False',
-    'SOCIAL_ANALYSIS_PERIOD_HOURS': '72',
-    'SOCIAL_MIN_MENTIONS_FOR_RATING': '3',
-    'SOCIAL_CACHE_DURATION_MINUTES': '30',
+    'SOCIAL_SENTIMENT_ENABLED': {
+        'value': 'False',
+        'type': 'boolean',
+        'category': 'Социальные сети',
+        'description': 'Включить анализ социальных настроений'
+    },
+    'SOCIAL_ANALYSIS_PERIOD_HOURS': {
+        'value': '72',
+        'type': 'integer',
+        'category': 'Социальные сети',
+        'description': 'Период анализа социальных данных в часах'
+    },
+    'SOCIAL_MIN_MENTIONS_FOR_RATING': {
+        'value': '3',
+        'type': 'integer',
+        'category': 'Социальные сети',
+        'description': 'Минимальное количество упоминаний для рейтинга'
+    },
+    'SOCIAL_CACHE_DURATION_MINUTES': {
+        'value': '30',
+        'type': 'integer',
+        'category': 'Социальные сети',
+        'description': 'Время кэширования социальных данных в минутах'
+    },
 }
 
 
@@ -125,37 +434,26 @@ def create_env_file():
 
     with open(ENV_FILE_PATH, 'w', encoding='utf-8') as f:
         f.write("# Настройки CryptoScan\n")
-        f.write("# Этот файл создан автоматически. Измените значения по необходимости.\n\n")
+        f.write("# Этот файл создан автоматически. Измените значения по необходимости.\n")
+        f.write(f"# Создан: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
         # Группируем настройки по категориям
-        categories = {
-            'Сервер': ['SERVER_HOST', 'SERVER_PORT'],
-            'База данных': ['DATABASE_URL', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'],
-            'Анализ объемов': ['ANALYSIS_HOURS', 'OFFSET_MINUTES', 'VOLUME_MULTIPLIER', 'MIN_VOLUME_USDT',
-                               'CONSECUTIVE_LONG_COUNT', 'ALERT_GROUPING_MINUTES', 'DATA_RETENTION_HOURS',
-                               'UPDATE_INTERVAL_SECONDS', 'PAIRS_CHECK_INTERVAL_MINUTES'],
-            'Фильтр цен': ['PRICE_CHECK_INTERVAL_MINUTES', 'PRICE_HISTORY_DAYS', 'PRICE_DROP_PERCENTAGE'],
-            'Watchlist': ['WATCHLIST_AUTO_UPDATE'],
-            'Telegram': ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID'],
-            'Bybit API': ['BYBIT_API_KEY', 'BYBIT_API_SECRET'],
-            'Логирование': ['LOG_LEVEL', 'LOG_FILE'],
-            'WebSocket': ['WS_PING_INTERVAL', 'WS_PING_TIMEOUT', 'WS_CLOSE_TIMEOUT', 'WS_MAX_SIZE'],
-            'Синхронизация времени': ['TIME_SYNC_INTERVAL', 'TIME_SERVER_SYNC_INTERVAL'],
-            'Имбаланс': ['MIN_GAP_PERCENTAGE', 'MIN_STRENGTH', 'FAIR_VALUE_GAP_ENABLED',
-                         'ORDER_BLOCK_ENABLED', 'BREAKER_BLOCK_ENABLED'],
-            'Стакан': ['ORDERBOOK_ENABLED', 'ORDERBOOK_SNAPSHOT_ON_ALERT'],
-            'Алерты': ['VOLUME_ALERTS_ENABLED', 'CONSECUTIVE_ALERTS_ENABLED', 'PRIORITY_ALERTS_ENABLED',
-                       'IMBALANCE_ENABLED', 'NOTIFICATION_ENABLED', 'VOLUME_TYPE'],
-            'Социальные сети': ['SOCIAL_SENTIMENT_ENABLED', 'SOCIAL_ANALYSIS_PERIOD_HOURS',
-                                'SOCIAL_MIN_MENTIONS_FOR_RATING', 'SOCIAL_CACHE_DURATION_MINUTES']
-        }
+        categories = {}
+        for key, config in DEFAULT_SETTINGS.items():
+            category = config['category']
+            if category not in categories:
+                categories[category] = []
+            categories[category].append(key)
 
         for category, keys in categories.items():
             f.write(f"# {category}\n")
             for key in keys:
-                if key in DEFAULT_SETTINGS:
-                    f.write(f"{key}={DEFAULT_SETTINGS[key]}\n")
+                config = DEFAULT_SETTINGS[key]
+                f.write(f"# {config['description']}\n")
+                f.write(f"{key}={config['value']}\n")
             f.write("\n")
+
+    print(f"✅ Создан файл настроек: {ENV_FILE_PATH}")
 
 
 def load_settings() -> Dict[str, Any]:
@@ -187,12 +485,13 @@ def load_settings() -> Dict[str, Any]:
                     settings[key.strip()] = value.strip()
     except Exception as e:
         print(f"Ошибка чтения .env файла: {e}")
-        return DEFAULT_SETTINGS
+        # Возвращаем значения по умолчанию
+        return {key: config['value'] for key, config in DEFAULT_SETTINGS.items()}
 
     # Дополняем недостающие настройки значениями по умолчанию
-    for key, default_value in DEFAULT_SETTINGS.items():
+    for key, config in DEFAULT_SETTINGS.items():
         if key not in settings:
-            settings[key] = default_value
+            settings[key] = config['value']
 
     _settings_cache = settings
     return settings
@@ -290,7 +589,79 @@ def get_setting(key: str, default: Any = None) -> Any:
     return value
 
 
-def update_setting(key: str, value: Any):
+def get_settings_schema() -> Dict[str, Any]:
+    """Получение схемы настроек с описаниями и типами"""
+    return DEFAULT_SETTINGS
+
+
+def get_settings_by_category() -> Dict[str, List[Dict]]:
+    """Получение настроек, сгруппированных по категориям"""
+    current_settings = load_settings()
+    categories = {}
+    
+    for key, config in DEFAULT_SETTINGS.items():
+        category = config['category']
+        if category not in categories:
+            categories[category] = []
+        
+        setting_info = {
+            'key': key,
+            'value': current_settings.get(key, config['value']),
+            'default_value': config['value'],
+            'type': config['type'],
+            'description': config['description']
+        }
+        
+        if 'options' in config:
+            setting_info['options'] = config['options']
+        
+        categories[category].append(setting_info)
+    
+    return categories
+
+
+def validate_setting_value(key: str, value: Any) -> tuple[bool, str, Any]:
+    """Валидация значения настройки"""
+    if key not in DEFAULT_SETTINGS:
+        return False, f"Неизвестная настройка: {key}", None
+    
+    config = DEFAULT_SETTINGS[key]
+    setting_type = config['type']
+    
+    try:
+        if setting_type == 'boolean':
+            if isinstance(value, bool):
+                validated_value = value
+            elif isinstance(value, str):
+                validated_value = value.lower() in ('true', '1', 'yes', 'on')
+            else:
+                validated_value = bool(value)
+        
+        elif setting_type == 'integer':
+            validated_value = int(float(value))
+        
+        elif setting_type == 'float':
+            validated_value = float(value)
+        
+        elif setting_type == 'string':
+            validated_value = str(value)
+        
+        elif setting_type == 'select':
+            str_value = str(value)
+            if 'options' in config and str_value not in config['options']:
+                return False, f"Недопустимое значение для {key}. Допустимые: {config['options']}", None
+            validated_value = str_value
+        
+        else:
+            validated_value = str(value)
+        
+        return True, "", validated_value
+    
+    except (ValueError, TypeError) as e:
+        return False, f"Ошибка преобразования значения для {key}: {e}", None
+
+
+def update_setting(key: str, value: Any) -> bool:
     """Обновление настройки в .env файле"""
     global _settings_cache
     
@@ -299,11 +670,18 @@ def update_setting(key: str, value: Any):
     except:
         logger = None
 
-    # Преобразуем значение в строку, обрабатывая булевы значения
-    if isinstance(value, bool):
-        str_value = 'True' if value else 'False'
+    # Валидируем значение
+    is_valid, error_msg, validated_value = validate_setting_value(key, value)
+    if not is_valid:
+        if logger:
+            logger.error(f"❌ {error_msg}")
+        return False
+
+    # Преобразуем значение в строку для записи в файл
+    if isinstance(validated_value, bool):
+        str_value = 'True' if validated_value else 'False'
     else:
-        str_value = str(value)
+        str_value = str(validated_value)
 
     settings = load_settings()
     settings[key] = str_value
@@ -315,26 +693,50 @@ def update_setting(key: str, value: Any):
         logger.info(f"⚙️ Настройка {key} обновлена на {str_value}")
 
     # Перезаписываем .env файл
-    with open(ENV_FILE_PATH, 'w', encoding='utf-8') as f:
-        f.write("# Настройки CryptoScan\n")
-        f.write(f"# Обновлено автоматически: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+    try:
+        with open(ENV_FILE_PATH, 'w', encoding='utf-8') as f:
+            f.write("# Настройки CryptoScan\n")
+            f.write(f"# Обновлено автоматически: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
-        for key, value in settings.items():
-            if not key.startswith('#'):
-                f.write(f"{key}={value}\n")
+            # Группируем по категориям для красивого вывода
+            categories = {}
+            for setting_key, setting_value in settings.items():
+                if setting_key in DEFAULT_SETTINGS:
+                    category = DEFAULT_SETTINGS[setting_key]['category']
+                    if category not in categories:
+                        categories[category] = []
+                    categories[category].append((setting_key, setting_value))
+                else:
+                    # Неизвестные настройки добавляем в конец
+                    if 'Прочее' not in categories:
+                        categories['Прочее'] = []
+                    categories['Прочее'].append((setting_key, setting_value))
 
-    # Принудительно очищаем кэш для следующего чтения
-    global _last_modified
-    _last_modified = 0
-    _settings_cache = {}
+            for category, items in categories.items():
+                f.write(f"# {category}\n")
+                for setting_key, setting_value in items:
+                    if setting_key in DEFAULT_SETTINGS:
+                        f.write(f"# {DEFAULT_SETTINGS[setting_key]['description']}\n")
+                    f.write(f"{setting_key}={setting_value}\n")
+                f.write("\n")
 
-    # Уведомляем о необходимости перезагрузки настроек
-    asyncio.create_task(reload_settings())
-    
-    return True
+        # Принудительно очищаем кэш для следующего чтения
+        global _last_modified
+        _last_modified = 0
+        _settings_cache = {}
+
+        # Уведомляем о необходимости перезагрузки настроек
+        asyncio.create_task(reload_settings())
+        
+        return True
+        
+    except Exception as e:
+        if logger:
+            logger.error(f"❌ Ошибка записи настройки в файл: {e}")
+        return False
 
 
-def update_multiple_settings(settings_dict: Dict[str, Any]) -> bool:
+def update_multiple_settings(settings_dict: Dict[str, Any]) -> tuple[bool, List[str]]:
     """Обновление нескольких настроек одновременно"""
     global _settings_cache
     
@@ -343,16 +745,29 @@ def update_multiple_settings(settings_dict: Dict[str, Any]) -> bool:
     except:
         logger = None
     
+    # Валидируем все настройки перед записью
+    validated_settings = {}
+    errors = []
+    
+    for key, value in settings_dict.items():
+        is_valid, error_msg, validated_value = validate_setting_value(key, value)
+        if is_valid:
+            if isinstance(validated_value, bool):
+                str_value = 'True' if validated_value else 'False'
+            else:
+                str_value = str(validated_value)
+            validated_settings[key] = str_value
+        else:
+            errors.append(error_msg)
+    
+    if errors:
+        return False, errors
+    
     # Загружаем текущие настройки
     current_settings = load_settings()
     
     # Обновляем настройки
-    for key, value in settings_dict.items():
-        if isinstance(value, bool):
-            str_value = 'True' if value else 'False'
-        else:
-            str_value = str(value)
-        
+    for key, str_value in validated_settings.items():
         current_settings[key] = str_value
         _settings_cache[key] = str_value
 
@@ -365,9 +780,26 @@ def update_multiple_settings(settings_dict: Dict[str, Any]) -> bool:
             f.write("# Настройки CryptoScan\n")
             f.write(f"# Обновлено автоматически: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
-            for key, value in current_settings.items():
-                if not key.startswith('#'):
-                    f.write(f"{key}={value}\n")
+            # Группируем по категориям
+            categories = {}
+            for setting_key, setting_value in current_settings.items():
+                if setting_key in DEFAULT_SETTINGS:
+                    category = DEFAULT_SETTINGS[setting_key]['category']
+                    if category not in categories:
+                        categories[category] = []
+                    categories[category].append((setting_key, setting_value))
+                else:
+                    if 'Прочее' not in categories:
+                        categories['Прочее'] = []
+                    categories['Прочее'].append((setting_key, setting_value))
+
+            for category, items in categories.items():
+                f.write(f"# {category}\n")
+                for setting_key, setting_value in items:
+                    if setting_key in DEFAULT_SETTINGS:
+                        f.write(f"# {DEFAULT_SETTINGS[setting_key]['description']}\n")
+                    f.write(f"{setting_key}={setting_value}\n")
+                f.write("\n")
         
         # Принудительно очищаем кэш
         global _last_modified
@@ -377,12 +809,52 @@ def update_multiple_settings(settings_dict: Dict[str, Any]) -> bool:
         # Уведомляем о необходимости перезагрузки настроек
         asyncio.create_task(reload_settings())
         
+        return True, []
+        
+    except Exception as e:
+        error_msg = f"Ошибка записи настроек в файл: {e}"
+        if logger:
+            logger.error(f"❌ {error_msg}")
+        return False, [error_msg]
+
+
+def reset_settings_to_default() -> bool:
+    """Сброс всех настроек к значениям по умолчанию"""
+    try:
+        # Удаляем существующий файл
+        if ENV_FILE_PATH.exists():
+            ENV_FILE_PATH.unlink()
+        
+        # Очищаем кэш
+        global _settings_cache, _last_modified
+        _settings_cache = {}
+        _last_modified = 0
+        
+        # Создаем новый файл с настройками по умолчанию
+        create_env_file()
+        
+        # Уведомляем о перезагрузке
+        asyncio.create_task(reload_settings())
+        
         return True
         
     except Exception as e:
-        if logger:
-            logger.error(f"❌ Ошибка записи настроек в файл: {e}")
+        try:
+            logger = logging.getLogger(__name__)
+            logger.error(f"❌ Ошибка сброса настроек: {e}")
+        except:
+            print(f"❌ Ошибка сброса настроек: {e}")
         return False
+
+
+def export_settings() -> Dict[str, Any]:
+    """Экспорт текущих настроек"""
+    return load_settings()
+
+
+def import_settings(settings_dict: Dict[str, Any]) -> tuple[bool, List[str]]:
+    """Импорт настроек из словаря"""
+    return update_multiple_settings(settings_dict)
 
 
 # Инициализация настроек при импорте модуля

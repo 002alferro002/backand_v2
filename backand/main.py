@@ -14,6 +14,11 @@ import json
 
 # Импорты наших модулей
 from settings import get_setting, register_settings_callback, start_settings_monitor, stop_settings_monitor
+from settings import (
+    get_setting, register_settings_callback, start_settings_monitor, stop_settings_monitor,
+    get_settings_schema, get_settings_by_category, reset_settings_to_default,
+    export_settings, import_settings, update_multiple_settings
+)
 from core.core_logger import get_logger
 from database.database_connection import DatabaseConnection
 from database.database_tables import DatabaseTables
@@ -164,6 +169,21 @@ class TradingSettingsUpdate(BaseModel):
     default_stop_loss_percentage: Optional[float] = None
     default_take_profit_percentage: Optional[float] = None
     auto_calculate_quantity: Optional[bool] = None
+
+
+class SettingsSchema(BaseModel):
+    """Модель для получения схемы настроек"""
+    pass
+
+
+class SettingsImport(BaseModel):
+    """Модель для импорта настроек"""
+    settings: Dict[str, Any]
+
+
+class SettingsReset(BaseModel):
+    """Модель для сброса настроек"""
+    confirm: bool = False
 
 
 class SettingsUpdate(BaseModel):
@@ -621,86 +641,24 @@ async def get_symbol_alerts(symbol: str, hours: int = 24):
 
 @app.get("/api/settings")
 async def get_settings():
-    """Получить текущие настройки анализатора"""
+    """Получить текущие настройки системы"""
     try:
-        # Загружаем настройки из .env файла
-        from settings import reload_settings, get_setting
-        await reload_settings()
+        # Получаем настройки, сгруппированные по категориям
+        settings_by_category = get_settings_by_category()
 
         # Информация о синхронизации времени
         time_sync_info = {}
         if time_manager:
             time_sync_info = time_manager.get_sync_status()
 
-        settings = {
-            "volume_analyzer": alert_manager.get_settings() if alert_manager else {},
-            "price_filter": price_filter.get_settings() if price_filter else {},
-            "server": {
-                "host": get_setting('SERVER_HOST', '0.0.0.0'),
-                "port": get_setting('SERVER_PORT', 8000)
-            },
-            "database": {
-                "url": get_setting('DATABASE_URL', ''),
-                "host": get_setting('DB_HOST', 'localhost'),
-                "port": get_setting('DB_PORT', 5432),
-                "name": get_setting('DB_NAME', 'cryptoscan'),
-                "user": get_setting('DB_USER', 'user'),
-                "password": get_setting('DB_PASSWORD', 'password')
-            },
-            "watchlist": {
-                "auto_update": get_setting('WATCHLIST_AUTO_UPDATE', True)
-            },
-            "alerts": {
-                "volume_alerts_enabled": get_setting('VOLUME_ALERTS_ENABLED', True),
-                "consecutive_alerts_enabled": get_setting('CONSECUTIVE_ALERTS_ENABLED', True),
-                "priority_alerts_enabled": get_setting('PRIORITY_ALERTS_ENABLED', True)
-            },
-            "imbalance": {
-                "fair_value_gap_enabled": get_setting('FAIR_VALUE_GAP_ENABLED', True),
-                "order_block_enabled": get_setting('ORDER_BLOCK_ENABLED', True),
-                "breaker_block_enabled": get_setting('BREAKER_BLOCK_ENABLED', True),
-                "min_gap_percentage": get_setting('MIN_GAP_PERCENTAGE', 0.1),
-                "min_strength": get_setting('MIN_STRENGTH', 0.5),
-                "enabled": get_setting('IMBALANCE_ENABLED', True)
-            },
-            "trading": {
-                "account_balance": get_setting('ACCOUNT_BALANCE', 10000),
-                "max_risk_per_trade": get_setting('MAX_RISK_PER_TRADE', 2.0),
-                "max_open_trades": get_setting('MAX_OPEN_TRADES', 5),
-                "default_stop_loss_percentage": get_setting('DEFAULT_STOP_LOSS_PERCENTAGE', 2.0),
-                "default_take_profit_percentage": get_setting('DEFAULT_TAKE_PROFIT_PERCENTAGE', 6.0),
-                "auto_calculate_quantity": get_setting('AUTO_CALCULATE_QUANTITY', True),
-                "enable_real_trading": get_setting('ENABLE_REAL_TRADING', False),
-                "default_leverage": get_setting('DEFAULT_LEVERAGE', 1),
-                "default_margin_type": get_setting('DEFAULT_MARGIN_TYPE', 'isolated'),
-                "confirm_trades": get_setting('CONFIRM_TRADES', True)
-            },
-            "bybit": {
-                "api_key": get_setting('BYBIT_API_KEY', ''),
-                "api_secret": get_setting('BYBIT_API_SECRET', '')
-            },
-            "logging": {
-                "level": get_setting('LOG_LEVEL', 'INFO'),
-                "file": get_setting('LOG_FILE', 'cryptoscan.log')
-            },
-            "websocket": {
-                "ping_interval": get_setting('WS_PING_INTERVAL', 20),
-                "min_strength": get_setting('MIN_STRENGTH', 0.5)
-            },
-            "orderbook": {
-                "enabled": get_setting('ORDERBOOK_ENABLED', False),
-                "snapshot_on_alert": get_setting('ORDERBOOK_SNAPSHOT_ON_ALERT', False)
-            },
-            "telegram": {
-                "enabled": telegram_bot.enabled if telegram_bot else False,
-                "bot_token": get_setting('TELEGRAM_BOT_TOKEN', ''),
-                "chat_id": get_setting('TELEGRAM_CHAT_ID', ''),
-                "enabled": bool(get_setting('TELEGRAM_BOT_TOKEN', '')) and bool(get_setting('TELEGRAM_CHAT_ID', ''))
-            },
-            "time_sync": time_sync_info
+        return {
+            "categories": settings_by_category,
+            "time_sync": time_sync_info,
+            "system_info": {
+                "config_file": str(ENV_FILE_PATH),
+                "last_modified": datetime.fromtimestamp(ENV_FILE_PATH.stat().st_mtime).isoformat() if ENV_FILE_PATH.exists() else None
+            }
         }
-
-        return settings
 
     except Exception as e:
         logger.error(f"Ошибка получения настроек: {e}")
@@ -772,69 +730,38 @@ async def test_trading_connection(credentials: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/settings/schema")
+async def get_settings_schema_endpoint():
+    """Получить схему настроек с описаниями и типами"""
+    try:
+        schema = get_settings_schema()
+        return {"schema": schema}
+    except Exception as e:
+        logger.error(f"Ошибка получения схемы настроек: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/settings")
 async def update_settings(settings_update: SettingsUpdate):
     """Обновить настройки анализатора"""
     try:
-        from settings import update_setting, update_multiple_settings
-
         settings = settings_update.settings
         
-        # Подготавливаем плоский словарь настроек для обновления
+        # Преобразуем вложенные настройки в плоский формат
         flat_settings = {}
-
-        # Обрабатываем настройки
         for key, value in settings.items():
-            if isinstance(value, dict):
-                # Для вложенных настроек
-                for sub_key, sub_value in value.items():
-                    # Преобразуем ключ в формат переменной окружения
-                    if key == 'server':
-                        env_key = f"SERVER_{sub_key.upper()}"
-                    elif key == 'database':
-                        env_key = f"DB_{sub_key.upper()}" if sub_key != 'url' else 'DATABASE_URL'
-                    elif key == 'volume_analyzer':
-                        env_key = sub_key.upper()
-                    elif key == 'price_filter':
-                        env_key = sub_key.upper()
-                    elif key == 'alerts':
-                        env_key = sub_key.upper()
-                    elif key == 'imbalance':
-                        env_key = sub_key.upper()
-                    elif key == 'trading':
-                        env_key = sub_key.upper()
-                    elif key == 'bybit':
-                        env_key = f"BYBIT_{sub_key.upper()}"
-                    elif key == 'logging':
-                        env_key = f"LOG_{sub_key.upper()}" if sub_key != 'level' else 'LOG_LEVEL'
-                    elif key == 'websocket':
-                        env_key = f"WS_{sub_key.upper()}"
-                    elif key == 'orderbook':
-                        env_key = f"ORDERBOOK_{sub_key.upper()}"
-                    elif key == 'telegram':
-                        if sub_key == 'bot_token':
-                            env_key = 'TELEGRAM_BOT_TOKEN'
-                        elif sub_key == 'chat_id':
-                            env_key = 'TELEGRAM_CHAT_ID'
-                        else:
-                            env_key = f"TELEGRAM_{sub_key.upper()}"
-                    else:
-                        env_key = f"{key.upper()}_{sub_key.upper()}"
-                    
-                    flat_settings[env_key] = sub_value
-            else:
-                env_key = key.upper()
-                flat_settings[env_key] = value
+            # Если это прямой ключ настройки (уже в правильном формате)
+            flat_settings[key] = value
         
         # Обновляем все настройки одним вызовом
-        success = update_multiple_settings(flat_settings)
+        success, errors = update_multiple_settings(flat_settings)
         
         if not success:
-            return {"status": "error", "message": "Ошибка сохранения настроек в файл"}
-
-        # Принудительно перезагружаем настройки
-        from settings import reload_settings
-        await reload_settings()
+            return {
+                "status": "error", 
+                "message": "Ошибка сохранения настроек", 
+                "errors": errors
+            }
 
         # Обновляем настройки во всех компонентах системы
         await update_all_components_settings(flat_settings)
@@ -851,7 +778,7 @@ async def update_settings(settings_update: SettingsUpdate):
         logger.info("✅ Настройки успешно обновлены через API")
         return {
             "status": "success", 
-            "settings": settings,
+            "updated_count": len(flat_settings),
             "message": "Настройки успешно обновлены и сохранены"
         }
         
@@ -872,13 +799,113 @@ async def update_settings(settings_update: SettingsUpdate):
         }
 
 
+@app.post("/api/settings/reset")
+async def reset_settings(reset_data: SettingsReset):
+    """Сброс настроек к значениям по умолчанию"""
+    try:
+        if not reset_data.confirm:
+            return {
+                "status": "error",
+                "message": "Требуется подтверждение для сброса настроек"
+            }
+        
+        success = reset_settings_to_default()
+        
+        if success:
+            # Обновляем настройки во всех компонентах
+            from settings import load_settings
+            new_settings = load_settings()
+            await update_all_components_settings(new_settings)
+            
+            await connection_manager.broadcast_json({
+                "type": "settings_reset",
+                "status": "success",
+                "message": "Настройки сброшены к значениям по умолчанию",
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
+            
+            return {
+                "status": "success",
+                "message": "Настройки успешно сброшены к значениям по умолчанию"
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Ошибка сброса настроек"
+            }
+            
+    except Exception as e:
+        logger.error(f"Ошибка сброса настроек: {e}")
+        return {
+            "status": "error",
+            "message": f"Ошибка сброса настроек: {str(e)}"
+        }
+
+
+@app.get("/api/settings/export")
+async def export_settings_endpoint():
+    """Экспорт текущих настроек"""
+    try:
+        settings = export_settings()
+        return {
+            "status": "success",
+            "settings": settings,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "count": len(settings)
+        }
+    except Exception as e:
+        logger.error(f"Ошибка экспорта настроек: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/settings/import")
+async def import_settings_endpoint(import_data: SettingsImport):
+    """Импорт настроек"""
+    try:
+        success, errors = import_settings(import_data.settings)
+        
+        if success:
+            # Обновляем настройки во всех компонентах
+            await update_all_components_settings(import_data.settings)
+            
+            await connection_manager.broadcast_json({
+                "type": "settings_imported",
+                "status": "success",
+                "count": len(import_data.settings),
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
+            
+            return {
+                "status": "success",
+                "imported_count": len(import_data.settings),
+                "message": "Настройки успешно импортированы"
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Ошибка импорта настроек",
+                "errors": errors
+            }
+            
+    except Exception as e:
+        logger.error(f"Ошибка импорта настроек: {e}")
+        return {
+            "status": "error",
+            "message": f"Ошибка импорта настроек: {str(e)}"
+        }
+
+
 @app.delete("/api/watchlist/{symbol}")
 @app.post("/api/settings/reload")
 async def reload_settings_endpoint():
     """Принудительная перезагрузка настроек из .env файла"""
     try:
-        from settings import reload_settings
+        from settings import reload_settings, load_settings
         await reload_settings()
+        
+        # Обновляем настройки во всех компонентах
+        new_settings = load_settings()
+        await update_all_components_settings(new_settings)
 
         return {"status": "success", "message": "Настройки перезагружены из .env файла"}
     except Exception as e:
