@@ -5,6 +5,8 @@ import asyncio
 import time
 from datetime import datetime
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     from watchdog.observers import Observer
@@ -26,6 +28,8 @@ _settings_cache = {}
 _last_modified = 0
 _settings_callbacks = []
 _file_observer = None
+_main_loop = None
+_executor = ThreadPoolExecutor(max_workers=1)
 
 # Настройки по умолчанию с описаниями и категориями
 DEFAULT_SETTINGS = {
@@ -424,7 +428,46 @@ class SettingsFileHandler(FileSystemEventHandler):
             return
 
         if event.src_path == str(ENV_FILE_PATH):
-            asyncio.create_task(reload_settings())
+            # Безопасный вызов асинхронной функции из другого потока
+            self._schedule_reload()
+    
+    def _schedule_reload(self):
+        """Планирование перезагрузки настроек в основном event loop"""
+        try:
+            if _main_loop and not _main_loop.is_closed():
+                # Планируем выполнение в основном event loop
+                asyncio.run_coroutine_threadsafe(reload_settings(), _main_loop)
+            else:
+                # Если основной loop недоступен, выполняем синхронную перезагрузку
+                print("⚠️ Основной event loop недоступен, выполняется синхронная перезагрузка настроек")
+                self._sync_reload()
+        except Exception as e:
+            print(f"❌ Ошибка планирования перезагрузки настроек: {e}")
+            # Fallback на синхронную перезагрузку
+            self._sync_reload()
+    
+    def _sync_reload(self):
+        """Синхронная перезагрузка настроек"""
+        try:
+            # Очищаем кэш
+            global _settings_cache
+            _settings_cache = {}
+            
+            # Загружаем новые настройки
+            new_settings = load_settings()
+            
+            # Уведомляем синхронные компоненты
+            for callback in _settings_callbacks:
+                try:
+                    if not asyncio.iscoroutinefunction(callback):
+                        callback(new_settings)
+                except Exception as e:
+                    print(f"Ошибка обновления настроек в синхронном компоненте: {e}")
+            
+            print(f"✅ Настройки перезагружены синхронно из .env файла")
+            
+        except Exception as e:
+            print(f"❌ Ошибка синхронной перезагрузки настроек: {e}")
 
 
 def create_env_file():
@@ -734,7 +777,15 @@ def update_setting(key: str, value: Any) -> bool:
         _settings_cache = {}
 
         # Уведомляем о необходимости перезагрузки настроек
-        asyncio.create_task(reload_settings())
+        try:
+            if _main_loop and not _main_loop.is_closed():
+                asyncio.run_coroutine_threadsafe(reload_settings(), _main_loop)
+            else:
+                # Синхронная перезагрузка если event loop недоступен
+                _settings_cache = {}
+                load_settings()
+        except Exception as e:
+            print(f"⚠️ Ошибка планирования перезагрузки после обновления настройки: {e}")
         
         return True
         
@@ -815,7 +866,15 @@ def update_multiple_settings(settings_dict: Dict[str, Any]) -> tuple[bool, List[
         _settings_cache = {}
         
         # Уведомляем о необходимости перезагрузки настроек
-        asyncio.create_task(reload_settings())
+        try:
+            if _main_loop and not _main_loop.is_closed():
+                asyncio.run_coroutine_threadsafe(reload_settings(), _main_loop)
+            else:
+                # Синхронная перезагрузка если event loop недоступен
+                _settings_cache = {}
+                load_settings()
+        except Exception as e:
+            print(f"⚠️ Ошибка планирования перезагрузки после обновления настроек: {e}")
         
         return True, []
         
@@ -842,7 +901,15 @@ def reset_settings_to_default() -> bool:
         create_env_file()
         
         # Уведомляем о перезагрузке
-        asyncio.create_task(reload_settings())
+        try:
+            if _main_loop and not _main_loop.is_closed():
+                asyncio.run_coroutine_threadsafe(reload_settings(), _main_loop)
+            else:
+                # Синхронная перезагрузка если event loop недоступен
+                _settings_cache = {}
+                load_settings()
+        except Exception as e:
+            print(f"⚠️ Ошибка планирования перезагрузки после сброса настроек: {e}")
         
         return True
         
