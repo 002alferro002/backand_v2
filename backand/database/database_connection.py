@@ -141,9 +141,13 @@ class DatabaseConnection:
         try:
             with self.get_cursor() as cursor:
                 cursor.execute(command, params)
-                return cursor.fetchone()
+                result = cursor.fetchone()
+                logger.debug(f"Команда выполнена, результат: {result}")
+                return result
         except Exception as e:
             logger.error(f"Ошибка выполнения команды с возвратом: {e}")
+            logger.error(f"Команда: {command}")
+            logger.error(f"Параметры: {params}")
             raise DatabaseException(f"Ошибка выполнения команды: {e}")
     
     def close(self):
