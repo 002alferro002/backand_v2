@@ -752,12 +752,24 @@ class DatabaseQueries:
             for row in result:
                 alert = dict(row)
                 # Парсим JSON поля
-                if alert['imbalance_data']:
+                if alert.get('imbalance_data'):
                     alert['imbalance_data'] = json.loads(alert['imbalance_data'])
-                if alert['candle_data']:
+                if alert.get('candle_data'):
                     alert['candle_data'] = json.loads(alert['candle_data'])
-                if alert['order_book_snapshot']:
+                if alert.get('order_book_snapshot'):
                     alert['order_book_snapshot'] = json.loads(alert['order_book_snapshot'])
+                
+                # Добавляем поле timestamp для совместимости с фронтендом
+                if alert.get('alert_timestamp_ms'):
+                    alert['timestamp'] = datetime.fromtimestamp(
+                        alert['alert_timestamp_ms'] / 1000, tz=timezone.utc
+                    ).isoformat()
+                
+                if alert.get('close_timestamp_ms'):
+                    alert['close_timestamp'] = datetime.fromtimestamp(
+                        alert['close_timestamp_ms'] / 1000, tz=timezone.utc
+                    ).isoformat()
+                
                 alerts.append(alert)
             
             return alerts

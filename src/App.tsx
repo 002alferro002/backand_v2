@@ -167,6 +167,11 @@ const App: React.FC = () => {
       const consecutiveAlerts = data.alerts.filter((a: any) => a.alert_type === 'consecutive_long');
       const priorityAlerts = data.alerts.filter((a: any) => a.alert_type === 'priority');
       
+      console.log('Инициализация алертов:', {
+        volume: volumeAlerts.length,
+        consecutive: consecutiveAlerts.length,
+        priority: priorityAlerts.length
+      });
       setVolumeAlerts(volumeAlerts.sort((a: any, b: any) =>
         new Date(b.close_timestamp || b.timestamp).getTime() - new Date(a.close_timestamp || a.timestamp).getTime()
       ));
@@ -193,23 +198,31 @@ const App: React.FC = () => {
           related_alert_id: a.id
         }));
       setSmartMoneyAlerts(smartMoneyAlerts);
+    } else {
+      console.log('Нет алертов в startup данных');
     }
     
     if (data.watchlist) {
-      setWatchlist(data.watchlist.map((symbol: string) => ({
+      const watchlistItems = Array.isArray(data.watchlist) 
+        ? data.watchlist.map((symbol: string) => ({
         id: Date.now() + Math.random(),
         symbol,
         is_active: true,
         is_favorite: false
-      })));
+      }))
+        : [];
+      setWatchlist(watchlistItems);
+      console.log('Инициализация watchlist:', watchlistItems.length, 'пар');
     }
     
     if (data.favorites) {
       setFavorites(data.favorites);
+      console.log('Инициализация избранного:', data.favorites.length, 'пар');
     }
     
     if (data.settings) {
       setSettings(data.settings);
+      console.log('Инициализация настроек');
     }
     
     setAppInitialized(true);

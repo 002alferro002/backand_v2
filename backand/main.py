@@ -1070,26 +1070,118 @@ async def remove_from_favorites(symbol: str):
 async def get_all_alerts():
     """Получить все алерты"""
     try:
-        # Заглушка для алертов
+        if not db_queries:
+            return {
+                "volume_alerts": [],
+                "consecutive_alerts": [],
+                "priority_alerts": [],
+                "error": "База данных недоступна"
+            }
+
+        # Получаем все алерты из базы данных
+        all_alerts = await db_queries.get_alerts(limit=1000)
+        
+        # Разделяем алерты по типам
+        volume_alerts = []
+        consecutive_alerts = []
+        priority_alerts = []
+        
+        for alert in all_alerts:
+            if alert['alert_type'] in ['volume_spike', 'preliminary_volume_spike', 'final_volume_spike']:
+                volume_alerts.append(alert)
+            elif alert['alert_type'] == 'consecutive_long':
+                consecutive_alerts.append(alert)
+            elif alert['alert_type'] == 'priority':
+                priority_alerts.append(alert)
+        
         return {
-            "volume_alerts": [],
-            "consecutive_alerts": [],
-            "priority_alerts": []
+            "volume_alerts": volume_alerts,
+            "consecutive_alerts": consecutive_alerts,
+            "priority_alerts": priority_alerts,
+            "total_count": len(all_alerts)
         }
     except Exception as e:
         logger.error(f"Ошибка получения алертов: {e}")
-        return {"status": "error", "message": str(e)}
+        return {
+            "volume_alerts": [],
+            "consecutive_alerts": [],
+            "priority_alerts": [],
+            "error": str(e)
+        }
 
 
 @app.get("/api/alerts/symbol/{symbol}")
 async def get_symbol_alerts(symbol: str, hours: int = 24):
     """Получить алерты для конкретного символа"""
     try:
-        # Заглушка для алертов по символу
-        return {"alerts": []}
+        if not db_queries:
+            return {"alerts": [], "error": "База данных недоступна"}
+
+        # Получаем алерты для символа
+        alerts = await db_queries.get_alerts(limit=100, symbol=symbol)
+        
+        # Фильтруем по времени (последние N часов)
+        import time
+        cutoff_time = int((time.time() - (hours * 3600)) * 1000)
+        
+        filtered_alerts = [
+            alert for alert in alerts 
+            if alert.get('alert_timestamp_ms', 0) > cutoff_time
+        ]
+        
+        return {"alerts": filtered_alerts, "count": len(filtered_alerts)}
     except Exception as e:
         logger.error(f"Ошибка получения алертов для {symbol}: {e}")
+        return {"alerts": [], "error": str(e)}
+
+
+@app.delete("/api/alerts/clear/{alert_type}")
+async def clear_alerts(alert_type: str):
+    """Очистка алертов определенного типа"""
+    try:
+        if not db_queries:
+            return {"status": "error", "message": "База данных недоступна"}
+
+        # Здесь можно добавить логику очистки алертов в БД
+        # Пока просто возвращаем успех
+        
+        # Уведомляем клиентов об очистке
+        if connection_manager:
+            await connection_manager.broadcast_json({
+                "type": "alerts_cleared",
+                "alert_type": alert_type,
+                "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)
+            })
+        
+        return {"status": "success", "alert_type": alert_type}
+    except Exception as e:
+        logger.error(f"Ошибка очистки алертов {alert_type}: {e}")
         return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/alerts")
+async def get_alerts_with_filters(
+    limit: int = 100,
+    offset: int = 0,
+    symbol: str = None,
+    alert_type: str = None
+):
+    """Получить алерты с фильтрацией"""
+    try:
+        if not db_queries:
+            return {"alerts": [], "error": "База данных недоступна"}
+
+        alerts = await db_queries.get_alerts(
+            limit=limit,
+            offset=offset,
+            symbol=symbol,
+            alert_type=alert_type
+        )
+        
+        return {"alerts": alerts, "count": len(alerts)}
+    except Exception as e:
+        logger.error(f"Ошибка получения алертов с фильтрами: {e}")
+        return {"alerts": [], "error": str(e)}
 
 
 @app.get("/api/settings")

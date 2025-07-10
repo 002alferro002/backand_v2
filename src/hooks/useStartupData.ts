@@ -26,6 +26,55 @@ export const useStartupData = (): UseStartupDataReturn => {
       setLoading(true);
       setError(null);
 
+      // Загружаем данные напрямую из основных API эндпоинтов
+      const [alertsResponse, watchlistResponse, favoritesResponse, settingsResponse] = await Promise.all([
+        fetch('/api/alerts/all'),
+        fetch('/api/watchlist'),
+        fetch('/api/favorites'),
+        fetch('/api/settings')
+      ]);
+
+      const alerts = alertsResponse.ok ? await alertsResponse.json() : { volume_alerts: [], consecutive_alerts: [], priority_alerts: [] };
+      const watchlist = watchlistResponse.ok ? await watchlistResponse.json() : { pairs: [] };
+      const favorites = favoritesResponse.ok ? await favoritesResponse.json() : { favorites: [] };
+      const settings = settingsResponse.ok ? await settingsResponse.json() : {};
+
+      const startupData = {
+        alerts: [
+          ...(alerts.volume_alerts || []),
+          ...(alerts.consecutive_alerts || []),
+          ...(alerts.priority_alerts || [])
+        ],
+        watchlist: watchlist.pairs?.map((p: any) => p.symbol) || [],
+        favorites: favorites.favorites || [],
+        settings: settings,
+        trading_settings: {},
+        data_integrity: {}
+      };
+
+      setData(startupData);
+      
+      console.log('Данные при запуске загружены:', {
+        alerts: startupData.alerts?.length || 0,
+        watchlist: startupData.watchlist?.length || 0,
+        favorites: startupData.favorites?.length || 0,
+        settings: Object.keys(startupData.settings || {}).length
+      });
+
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Неизвестная ошибка';
+      setError(errorMessage);
+      console.error('Ошибка загрузки данных при запуске:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadDataOld = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+
       const response = await fetch('/api/startup/data');
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
