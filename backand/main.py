@@ -12,6 +12,14 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import json
 
+
+# Импорты API маршрутов
+from cryptoscan.backand.api.api_alerts import setup_alerts_routes
+from cryptoscan.backand.api.api_watchlist import setup_watchlist_routes
+from cryptoscan.backand.api.api_favorites import setup_favorites_routes
+from cryptoscan.backand.api.api_trading import setup_trading_routes
+from cryptoscan.backand.api.api_kline import setup_kline_routes
+
 # Импорты наших модулей
 from settings import (
     get_setting, register_settings_callback, start_settings_monitor, stop_settings_monitor,
