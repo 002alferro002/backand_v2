@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 class AlertManager:
     """Менеджер алертов"""
 
-    def __init__(self, db_queries, telegram_bot=None, connection_manager=None, time_manager=None):
+    def __init__(self, db_queries=None, telegram_bot=None, connection_manager=None, time_manager=None):
         self.db_queries = db_queries
         self.telegram_bot = telegram_bot
         self.connection_manager = connection_manager
@@ -598,6 +598,8 @@ class AlertManager:
                         logger.warning("⚠️ Не удалось сохранить алерт в БД")
                 except Exception as e:
                     logger.error(f"❌ Ошибка сохранения алерта в БД: {e}")
+            else:
+                logger.warning("⚠️ db_queries не инициализирован - алерт не сохранен в БД")
 
             logger.info(f"✅ Алерт отправлен: {alert_data['symbol']} - {alert_data['alert_type']}")
 
