@@ -124,6 +124,8 @@ class DatabaseTables:
         await self.db_connection.execute_command(
             "CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status)"
         )
+        
+        logger.info("✅ Таблица alerts создана/проверена")
     
     async def _create_favorites_table(self):
         """Создание таблицы favorites"""

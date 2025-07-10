@@ -673,6 +673,8 @@ class DatabaseQueries:
     async def save_alert(self, alert_data: Dict) -> int:
         """Сохранение алерта в базу данных"""
         try:
+            logger.info(f"💾 Попытка сохранения алерта: {alert_data['symbol']} - {alert_data['alert_type']}")
+            
             query = """
             INSERT INTO alerts (
                 symbol, alert_type, price, volume_ratio, current_volume_usdt, 
@@ -703,10 +705,16 @@ class DatabaseQueries:
                 alert_data.get('status', 'active')
             ))
             
-            return result['id'] if result else None
+            if result and 'id' in result:
+                logger.info(f"✅ Алерт успешно сохранен в БД с ID: {result['id']}")
+                return result['id']
+            else:
+                logger.error(f"❌ Не удалось получить ID сохраненного алерта")
+                return None
             
         except Exception as e:
             logger.error(f"Ошибка сохранения алерта: {e}")
+            logger.error(f"Данные алерта: {alert_data}")
             raise DatabaseException(f"Ошибка сохранения алерта: {e}")
 
     async def get_alerts(self, limit: int = 100, offset: int = 0, symbol: str = None, 
