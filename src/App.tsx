@@ -127,7 +127,8 @@ const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [startupData, setStartupData] = useState<any>(null);
+  const [appInitialized, setAppInitialized] = useState(false);
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
   const [timeSync, setTimeSync] = useState<TimeSync | null>(null);
   const [lastDataUpdate, setLastDataUpdate] = useState<Date | null>(null);
@@ -147,99 +148,95 @@ const App: React.FC = () => {
   const dataRefreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const activityTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Обработчик загрузки данных при запуске
+  useEffect(() => {
+    // Инициализация происходит только после загрузки startup данных
+    if (appInitialized && startupData) {
+      initializeApp();
+    }
+  }, [appInitialized, startupData]);
+
   const handleStartupDataLoaded = (data: any) => {
     console.log('Startup data loaded:', data);
     setStartupData(data);
     
-    // Инициализируем состояние данными из startup
+    // Инициализируем состояние из startup данных
     if (data.alerts) {
-      // Сортируем алерты по времени
-      const sortAlerts = (alerts: Alert[]) => alerts.sort((a, b) =>
-        new Date(b.close_timestamp || b.timestamp).getTime() - new Date(a.close_timestamp || a.timestamp).getTime()
-      );
-      
-      // Фильтруем алерты по типам
-      const volumeAlerts = data.alerts.filter((a: Alert) => 
+      // Разделяем алерты по типам
+      const volumeAlerts = data.alerts.filter((a: any) => 
         a.alert_type === 'volume_spike' || a.alert_type === 'preliminary_volume_spike' || a.alert_type === 'final_volume_spike'
       );
-      const consecutiveAlerts = data.alerts.filter((a: Alert) => a.alert_type === 'consecutive_long');
-      const priorityAlerts = data.alerts.filter((a: Alert) => a.alert_type === 'priority');
+      const consecutiveAlerts = data.alerts.filter((a: any) => a.alert_type === 'consecutive_long');
+      const priorityAlerts = data.alerts.filter((a: any) => a.alert_type === 'priority');
       
-      setVolumeAlerts(sortAlerts(volumeAlerts));
-      setConsecutiveAlerts(sortAlerts(consecutiveAlerts));
-      setPriorityAlerts(sortAlerts(priorityAlerts));
+      setVolumeAlerts(volumeAlerts.sort((a: any, b: any) =>
+        new Date(b.close_timestamp || b.timestamp).getTime() - new Date(a.close_timestamp || a.timestamp).getTime()
+      ));
+      setConsecutiveAlerts(consecutiveAlerts.sort((a: any, b: any) =>
+        new Date(b.close_timestamp || b.timestamp).getTime() - new Date(a.close_timestamp || a.timestamp).getTime()
+      ));
+      setPriorityAlerts(priorityAlerts.sort((a: any, b: any) =>
+        new Date(b.close_timestamp || b.timestamp).getTime() - new Date(a.close_timestamp || a.timestamp).getTime()
+      ));
       
       // Создаем Smart Money алерты из алертов с имбалансом
-      const smartMoneyAlerts: SmartMoneyAlert[] = [];
-      data.alerts.forEach((alert: Alert) => {
-        if (alert.has_imbalance && alert.imbalance_data) {
-          smartMoneyAlerts.push({
-            id: Date.now() + Math.random(),
-            symbol: alert.symbol,
-            type: alert.imbalance_data.type,
-            direction: alert.imbalance_data.direction,
-            strength: alert.imbalance_data.strength,
-            price: alert.price,
-            timestamp: alert.timestamp,
-            top: alert.imbalance_data.top,
-            bottom: alert.imbalance_data.bottom,
-            related_alert_id: alert.id
-          });
-        }
-      });
+      const smartMoneyAlerts = data.alerts
+        .filter((a: any) => a.has_imbalance && a.imbalance_data)
+        .map((a: any) => ({
+          id: Date.now() + Math.random(),
+          symbol: a.symbol,
+          type: a.imbalance_data.type,
+          direction: a.imbalance_data.direction,
+          strength: a.imbalance_data.strength,
+          price: a.price,
+          timestamp: a.timestamp,
+          top: a.imbalance_data.top,
+          bottom: a.imbalance_data.bottom,
+          related_alert_id: a.id
+        }));
       setSmartMoneyAlerts(smartMoneyAlerts);
     }
     
-    // Инициализируем watchlist
     if (data.watchlist) {
-      const watchlistItems: WatchlistItem[] = data.watchlist.map((symbol: string, index: number) => ({
-        id: index,
+      setWatchlist(data.watchlist.map((symbol: string) => ({
+        id: Date.now() + Math.random(),
         symbol,
         is_active: true,
-        is_favorite: false,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      }));
-      setWatchlist(watchlistItems);
+        is_favorite: false
+      })));
     }
     
-    // Инициализируем избранное
     if (data.favorites) {
       setFavorites(data.favorites);
     }
     
-    // Инициализируем настройки
     if (data.settings) {
       setSettings(data.settings);
     }
     
-    setIsStartupComplete(true);
-    setLoading(false);
+    setAppInitialized(true);
   };
 
+  const initializeApp = () => {
+    connectWebSocket();
+    requestNotificationPermission();
+
+    // Обновляем время каждую секунду
+    timeIntervalRef.current = setInterval(() => {
+      updateCurrentTime();
+    }, 1000);
+
+    // Загружаем информацию о синхронизации времени каждые 30 секунд
+    syncIntervalRef.current = setInterval(loadTimeSync, 30000);
+    loadTimeSync();
+
+    // Периодически обновляем данные (каждые 30 секунд)
+    dataRefreshIntervalRef.current = setInterval(() => {
+      refreshData();
+    }, 30000);
+  };
+
+  // Cleanup effect
   useEffect(() => {
-    // Запускаем инициализацию только после загрузки startup данных
-    if (isStartupComplete) {
-      connectWebSocket();
-      requestNotificationPermission();
-
-      // Обновляем время каждую секунду
-      timeIntervalRef.current = setInterval(() => {
-        updateCurrentTime();
-      }, 1000);
-
-      // Загружаем информацию о синхронизации времени каждые 30 секунд
-      syncIntervalRef.current = setInterval(loadTimeSync, 30000);
-      loadTimeSync();
-
-      // Периодически обновляем данные (каждые 30 секунд)
-      dataRefreshIntervalRef.current = setInterval(() => {
-        refreshData();
-      }, 30000);
-    }
-
-    // Cleanup function
     return () => {
       if (timeIntervalRef.current) {
         clearInterval(timeIntervalRef.current);
@@ -260,7 +257,7 @@ const App: React.FC = () => {
         wsRef.current.close();
       }
     };
-  }, [isStartupComplete]);
+  }, []);
 
   const updateCurrentTime = () => {
     setCurrentTime(new Date());
@@ -780,6 +777,48 @@ const App: React.FC = () => {
     }
   };
 
+  const renderAlertModal = () => {
+    if (!selectedAlert) return null;
+
+    // Определяем тип алерта и показываем соответствующий модал
+    if (selectedAlert.alert_type === 'volume_spike' || 
+        selectedAlert.alert_type === 'preliminary_volume_spike' || 
+        selectedAlert.alert_type === 'final_volume_spike') {
+      return (
+        <VolumeAlertModal
+          alert={selectedAlert as any}
+          onClose={() => setSelectedAlert(null)}
+        />
+      );
+    }
+
+    if (selectedAlert.alert_type === 'consecutive_long') {
+      return (
+        <ConsecutiveAlertModal
+          alert={selectedAlert as any}
+          onClose={() => setSelectedAlert(null)}
+        />
+      );
+    }
+
+    if (selectedAlert.alert_type === 'priority') {
+      return (
+        <PriorityAlertModal
+          alert={selectedAlert as any}
+          onClose={() => setSelectedAlert(null)}
+        />
+      );
+    }
+
+    // Fallback на обычный ChartSelector
+    return (
+      <ChartSelector
+        alert={selectedAlert}
+        onClose={() => setSelectedAlert(null)}
+      />
+    );
+  };
+
   const getDataActivityIcon = () => {
     switch (dataActivity) {
       case 'active':
@@ -1091,21 +1130,21 @@ const App: React.FC = () => {
     </div>
   );
 
-  // Показываем StartupLoader пока не завершена инициализация
-  if (!isStartupComplete) {
-    return (
-      <StartupLoader onDataLoaded={handleStartupDataLoaded}>
-        <div />
-      </StartupLoader>
-    );
-  }
-
   const timeSyncStatus = getTimeSyncStatus();
   const timezoneInfo = getTimezoneInfo();
 
   return (
     <TimeZoneProvider>
-      <div className="min-h-screen bg-gray-50">
+      <StartupLoader onDataLoaded={handleStartupDataLoaded}>
+        {!appInitialized ? (
+          <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+            <div className="text-center">
+              <RefreshCw className="w-8 h-8 animate-spin text-blue-600 mx-auto mb-4" />
+              <p className="text-gray-600">Инициализация приложения...</p>
+            </div>
+          </div>
+        ) : (
+          <div className="min-h-screen bg-gray-50">
         {/* Header */}
         <header className="bg-white shadow-sm border-b border-gray-200">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -1445,34 +1484,7 @@ const App: React.FC = () => {
         </main>
 
         {/* Modals */}
-        {selectedAlert && selectedAlert.alert_type === 'volume_spike' && (
-          <VolumeAlertModal
-            alert={selectedAlert}
-            onClose={() => setSelectedAlert(null)}
-          />
-        )}
-
-        {selectedAlert && selectedAlert.alert_type === 'consecutive_long' && (
-          <ConsecutiveAlertModal
-            alert={selectedAlert}
-            onClose={() => setSelectedAlert(null)}
-          />
-        )}
-
-        {selectedAlert && selectedAlert.alert_type === 'priority' && (
-          <PriorityAlertModal
-            alert={selectedAlert}
-            onClose={() => setSelectedAlert(null)}
-          />
-        )}
-
-        {/* Fallback для других типов алертов */}
-        {selectedAlert && !['volume_spike', 'consecutive_long', 'priority'].includes(selectedAlert.alert_type) && (
-          <ChartSelector
-            alert={selectedAlert}
-            onClose={() => setSelectedAlert(null)}
-          />
-        )}
+        {renderAlertModal()}
 
         {selectedSmartMoneyAlert && (
           <ChartSelector
@@ -1531,6 +1543,8 @@ const App: React.FC = () => {
           />
         )}
       </div>
+        )}
+      </StartupLoader>
     </TimeZoneProvider>
   );
 };
