@@ -127,7 +127,6 @@ const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [startupData, setStartupData] = useState<any>(null);
   const [appInitialized, setAppInitialized] = useState(false);
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
   const [timeSync, setTimeSync] = useState<TimeSync | null>(null);
