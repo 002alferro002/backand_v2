@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Loader2, Database, AlertTriangle, CheckCircle, RefreshCw } from 'lucide-react';
 import { useStartupData } from '../hooks/useStartupData';
 
@@ -9,9 +9,13 @@ interface StartupLoaderProps {
 
 const StartupLoader: React.FC<StartupLoaderProps> = ({ onDataLoaded, children }) => {
   const { data, loading, error, reload } = useStartupData();
+  const dataLoadedRef = useRef(false);
 
-  React.useEffect(() => {
-    if (data && !loading) {
+  useEffect(() => {
+    // Вызываем onDataLoaded только один раз когда данные загружены
+    if (data && !loading && !dataLoadedRef.current) {
+      console.log('📊 StartupLoader: передача данных в App');
+      dataLoadedRef.current = true;
       onDataLoaded(data);
     }
   }, [data, loading, onDataLoaded]);
@@ -82,7 +86,10 @@ const StartupLoader: React.FC<StartupLoaderProps> = ({ onDataLoaded, children })
             </div>
             
             <button
-              onClick={reload}
+              onClick={() => {
+                dataLoadedRef.current = false; // Сбрасываем флаг для повторной загрузки
+                reload();
+              }}
               className="w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center"
             >
               <RefreshCw className="w-4 h-4 mr-2" />
@@ -110,7 +117,10 @@ const StartupLoader: React.FC<StartupLoaderProps> = ({ onDataLoaded, children })
             </p>
             
             <button
-              onClick={reload}
+              onClick={() => {
+                dataLoadedRef.current = false; // Сбрасываем флаг для повторной загрузки
+                reload();
+              }}
               className="w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center"
             >
               <RefreshCw className="w-4 h-4 mr-2" />

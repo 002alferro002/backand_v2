@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 
 interface StartupData {
   alerts: any[];
@@ -21,10 +21,12 @@ export const useStartupData = (): UseStartupDataReturn => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
+
+      console.log('🔄 Загрузка данных при запуске...');
 
       // Загружаем данные напрямую из основных API эндпоинтов
       const [alertsResponse, watchlistResponse, favoritesResponse, settingsResponse] = await Promise.all([
@@ -54,7 +56,7 @@ export const useStartupData = (): UseStartupDataReturn => {
 
       setData(startupData);
       
-      console.log('Данные при запуске загружены:', {
+      console.log('✅ Данные при запуске загружены:', {
         alerts: startupData.alerts?.length || 0,
         watchlist: startupData.watchlist?.length || 0,
         favorites: startupData.favorites?.length || 0,
@@ -64,45 +66,16 @@ export const useStartupData = (): UseStartupDataReturn => {
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Неизвестная ошибка';
       setError(errorMessage);
-      console.error('Ошибка загрузки данных при запуске:', err);
+      console.error('❌ Ошибка загрузки данных при запуске:', err);
     } finally {
       setLoading(false);
     }
-  };
+  }, []); // Пустой массив зависимостей
 
-  const loadDataOld = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      const response = await fetch('/api/startup/data');
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const startupData = await response.json();
-      setData(startupData);
-      
-      console.log('Данные при запуске загружены:', {
-        alerts: startupData.alerts?.length || 0,
-        watchlist: startupData.watchlist?.length || 0,
-        favorites: startupData.favorites?.length || 0,
-        settings: Object.keys(startupData.settings || {}).length,
-        data_integrity: Object.keys(startupData.data_integrity || {}).length
-      });
-
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Неизвестная ошибка';
-      setError(errorMessage);
-      console.error('Ошибка загрузки данных при запуске:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const reload = async () => {
+  const reload = useCallback(async () => {
     try {
       setError(null);
+      console.log('🔄 Перезагрузка данных...');
       
       // Сначала запрашиваем перезагрузку на сервере
       const reloadResponse = await fetch('/api/startup/data/reload', {
@@ -112,20 +85,21 @@ export const useStartupData = (): UseStartupDataReturn => {
       if (reloadResponse.ok) {
         const reloadData = await reloadResponse.json();
         setData(reloadData.data);
+        console.log('✅ Данные перезагружены с сервера');
       } else {
         // Если перезагрузка не удалась, просто загружаем данные заново
         await loadData();
       }
     } catch (err) {
-      console.error('Ошибка перезагрузки данных:', err);
+      console.error('❌ Ошибка перезагрузки данных:', err);
       // При ошибке перезагрузки пробуем обычную загрузку
       await loadData();
     }
-  };
+  }, [loadData]);
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [loadData]); // Теперь loadData стабильная функция благодаря useCallback
 
   return {
     data,

@@ -156,10 +156,14 @@ const App: React.FC = () => {
 
   const handleStartupDataLoaded = (data: any) => {
     console.log('Startup data loaded:', data);
-    setStartupData(data);
+    
+    // Проверяем, что данные еще не были загружены
+    if (!startupData) {
+      setStartupData(data);
+    }
     
     // Инициализируем состояние из startup данных
-    if (data.alerts) {
+    if (data.alerts && !appInitialized) {
       // Разделяем алерты по типам
       const volumeAlerts = data.alerts.filter((a: any) => 
         a.alert_type === 'volume_spike' || a.alert_type === 'preliminary_volume_spike' || a.alert_type === 'final_volume_spike'
@@ -202,7 +206,7 @@ const App: React.FC = () => {
       console.log('Нет алертов в startup данных');
     }
     
-    if (data.watchlist) {
+    if (data.watchlist && !appInitialized) {
       const watchlistItems = Array.isArray(data.watchlist) 
         ? data.watchlist.map((symbol: string) => ({
         id: Date.now() + Math.random(),
@@ -215,17 +219,20 @@ const App: React.FC = () => {
       console.log('Инициализация watchlist:', watchlistItems.length, 'пар');
     }
     
-    if (data.favorites) {
+    if (data.favorites && !appInitialized) {
       setFavorites(data.favorites);
       console.log('Инициализация избранного:', data.favorites.length, 'пар');
     }
     
-    if (data.settings) {
+    if (data.settings && !appInitialized) {
       setSettings(data.settings);
       console.log('Инициализация настроек');
     }
     
-    setAppInitialized(true);
+    // Устанавливаем флаг инициализации только один раз
+    if (!appInitialized) {
+      setAppInitialized(true);
+    }
   };
 
   const initializeApp = () => {
