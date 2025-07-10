@@ -19,6 +19,7 @@ from cryptoscan.backand.api.api_watchlist import setup_watchlist_routes
 from cryptoscan.backand.api.api_favorites import setup_favorites_routes
 from cryptoscan.backand.api.api_trading import setup_trading_routes
 from cryptoscan.backand.api.api_kline import setup_kline_routes
+from cryptoscan.backand.api.api_startup import setup_startup_routes
 
 # Импорты наших модулей
 from settings import (
@@ -690,6 +691,9 @@ async def lifespan(app: FastAPI):
             
             kline_router = setup_kline_routes(db_queries)
             app.include_router(kline_router)
+            
+            startup_router = setup_startup_routes(db_queries, alert_manager, price_filter)
+            app.include_router(startup_router)
             
             logger.info("✅ API маршруты настроены")
         except Exception as e:
