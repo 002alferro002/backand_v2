@@ -20,6 +20,7 @@ from cryptoscan.backand.api.api_favorites import setup_favorites_routes
 from cryptoscan.backand.api.api_trading import setup_trading_routes
 from cryptoscan.backand.api.api_kline import setup_kline_routes
 from cryptoscan.backand.api.api_startup import setup_startup_routes
+from cryptoscan.backand.api.api_startup import setup_startup_routes
 
 # Импорты наших модулей
 from settings import (
@@ -179,6 +180,7 @@ async def load_missing_data_for_symbol(symbol: str, analysis_hours: int, offset_
 
         logger.info(f"📥 Загрузка недостающих данных для {symbol}")
 
+        startup_router = setup_startup_routes(database_manager.db_queries, alert_manager, price_filter)
         # Загружаем данные пакетами по 24 часа
         batch_size_hours = 24
         current_start = start_time_ms
@@ -936,6 +938,7 @@ async def get_stats():
             "subscription_stats": subscription_stats,
             "last_update": datetime.now(timezone.utc).isoformat(),
             "system_status": "running",
+        app.include_router(startup_router)
             "time_sync": time_sync_info
         }
     except Exception as e:
