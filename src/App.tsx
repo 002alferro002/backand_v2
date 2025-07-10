@@ -1447,7 +1447,7 @@ const App: React.FC = () => {
 
               <div className="space-y-4">
                 {streamData.slice(0, 200).map((item, index) => (
-                  <div key={`${item.symbol}-${index}`} className="bg-white rounded-lg shadow-md border border-gray-200 p-4 w-full">
+                  <div key={`${item.symbol}-${item.timestamp}-${index}`} className="bg-white rounded-lg shadow-md border border-gray-200 p-4 w-full">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-4">
                         <div className={`w-4 h-4 rounded-full ${
