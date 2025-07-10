@@ -674,6 +674,27 @@ async def lifespan(app: FastAPI):
         # Запускаем мониторинг изменений .env файла
         start_settings_monitor()
 
+        # Настройка API маршрутов
+        try:
+            alerts_router = setup_alerts_routes(db_queries)
+            app.include_router(alerts_router)
+            
+            watchlist_router = setup_watchlist_routes(db_queries)
+            app.include_router(watchlist_router)
+            
+            favorites_router = setup_favorites_routes(db_queries)
+            app.include_router(favorites_router)
+            
+            trading_router = setup_trading_routes(db_queries)
+            app.include_router(trading_router)
+            
+            kline_router = setup_kline_routes(db_queries)
+            app.include_router(kline_router)
+            
+            logger.info("✅ API маршруты настроены")
+        except Exception as e:
+            logger.error(f"❌ Ошибка настройки API маршрутов: {e}")
+
         if db_initialized:
             logger.info("✅ Система успешно запущена в полном режиме!")
         else:
